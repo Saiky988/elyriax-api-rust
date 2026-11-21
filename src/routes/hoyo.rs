@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, patch, post},
     Json, Router,
 };
 use chrono::Utc;
@@ -17,8 +17,10 @@ use crate::{
     error::{AppError, AppResult},
     services::hoyo::{
         account::{
-            add_account, delete_account, get_account_by_id, get_accounts, get_ready_payload,
-            update_account,
+            add_account, delete_account, discover_all_roles_from_cookie, get_account_by_id,
+            get_accounts, get_all_ready_payloads_for_user, get_all_user_accounts,
+            get_ready_payload, link_all_games_with_single_cookie, update_account,
+            update_shared_cookie_for_user,
         },
         checkin::{check_in_daily, get_check_in_list},
         feed::{get_all_games_codes, get_game_calendar, get_game_codes, get_game_news},
@@ -33,6 +35,14 @@ use crate::{
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/codes", get(all_games_codes_ep))
+        // One-Cookie Multi-Game Management (1 Cookie -> Auto-discover & sync Genshin + HSR + ZZZ)
+        .route("/accounts", get(all_user_accounts_ep))
+        .route("/accounts/preview", post(preview_single_cookie_ep))
+        .route("/accounts/link", post(link_single_cookie_ep))
+        .route("/accounts/cookie", patch(update_shared_cookie_ep))
+        .route("/checkin-all", post(checkin_all_user_games_ep))
+        .route("/auto-redeem-all", post(auto_redeem_all_user_games_ep))
+        // Per-Game Dynamic Routes
         .route("/{game}/codes", get(game_codes_ep))
         .route("/{game}/calendar", get(game_calendar_ep))
         .route("/{game}/news/{kind}", get(game_news_ep))
@@ -169,9 +179,177 @@ struct AddAccountBody {
 }
 
 #[derive(Deserialize)]
+struct SingleCookiePreviewBody {
+    cookie: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SingleCookieLinkBody {
+    cookie: Option<String>,
+    auto_checkin: Option<bool>,
+    auto_redeem: Option<bool>,
+    auto_daily_note: Option<bool>,
+    games: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
 struct RedeemBody {
     code: Option<String>,
 }
+
+// =========================================================================
+// ONE-COOKIE MULTI-GAME HANDLERS
+// =========================================================================
+
+async fn all_user_accounts_ep(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> AppResult<Json<Value>> {
+    let data = get_all_user_accounts(&state, user.id).await?;
+    Ok(send_success(
+        "Lấy toàn bộ tài khoản HoYoverse (Genshin, HSR, ZZZ) thành công",
+        data,
+    ))
+}
+
+async fn preview_single_cookie_ep(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    Json(body): Json<SingleCookiePreviewBody>,
+) -> AppResult<Json<Value>> {
+    let cookie = body
+        .cookie
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| AppError::bad_request("Thiếu cookie HoYoLAB."))?;
+    let roles = discover_all_roles_from_cookie(&state, &cookie, None).await?;
+    Ok(send_success(
+        "Quét danh sách nhân vật HoYoverse thành công",
+        json!({ "count": roles.len(), "roles": roles }),
+    ))
+}
+
+async fn link_single_cookie_ep(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Json(body): Json<SingleCookieLinkBody>,
+) -> AppResult<Json<Value>> {
+    let cookie = body
+        .cookie
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| AppError::bad_request("Thiếu cookie HoYoLAB."))?;
+
+    let parsed_games: Option<Vec<HoyoGame>> = if let Some(list) = body.games {
+        let mut out = Vec::new();
+        for g in list {
+            out.push(HoyoGame::from_slug(&g)?);
+        }
+        Some(out)
+    } else {
+        None
+    };
+
+    let data = link_all_games_with_single_cookie(
+        &state,
+        user.id,
+        &cookie,
+        body.auto_checkin.unwrap_or(true),
+        body.auto_redeem.unwrap_or(true),
+        body.auto_daily_note.unwrap_or(false),
+        parsed_games.as_deref(),
+    )
+    .await?;
+
+    Ok(send_success(
+        "Đã tự động liên kết toàn bộ nhân vật từ 1 Cookie HoYoLAB thành công",
+        data,
+    ))
+}
+
+async fn update_shared_cookie_ep(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Json(body): Json<SingleCookiePreviewBody>,
+) -> AppResult<Json<Value>> {
+    let cookie = body
+        .cookie
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| AppError::bad_request("Thiếu cookie HoYoLAB mới."))?;
+    let data = update_shared_cookie_for_user(&state, user.id, &cookie).await?;
+    Ok(send_success(
+        "Đã cập nhật Cookie mới đồng loạt cho tất cả tài khoản HoYoverse",
+        data,
+    ))
+}
+
+async fn checkin_all_user_games_ep(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> AppResult<Json<Value>> {
+    let payloads = get_all_ready_payloads_for_user(&state, user.id).await?;
+    let mut results = Vec::with_capacity(payloads.len());
+
+    for p in payloads {
+        match check_in_daily(&state, p.game, &p.cookie, &p.server).await {
+            Ok(res) => results.push(res),
+            Err(err) => results.push(json!({
+                "ok": false,
+                "game": p.game.slug(),
+                "account_id": p.account_id,
+                "uid": p.uid,
+                "error": err.to_string(),
+            })),
+        }
+    }
+
+    Ok(send_success(
+        "Hoàn tất điểm danh tất cả game HoYoverse",
+        json!({ "total": results.len(), "results": results }),
+    ))
+}
+
+async fn auto_redeem_all_user_games_ep(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Query(q): Query<RefreshQuery>,
+) -> AppResult<Json<Value>> {
+    let payloads = get_all_ready_payloads_for_user(&state, user.id).await?;
+    let mut results = Vec::with_capacity(payloads.len());
+    let force_refresh = q.refresh.unwrap_or(false);
+
+    for (idx, p) in payloads.into_iter().enumerate() {
+        match auto_redeem_for_account(
+            &state,
+            p.game,
+            p.account_id,
+            &p.cookie,
+            &p.uid,
+            &p.server,
+            &p.nickname,
+            user.email.as_deref(),
+            force_refresh && idx == 0,
+        )
+        .await
+        {
+            Ok(summary) => results.push(summary),
+            Err(err) => results.push(json!({
+                "ok": false,
+                "game": p.game.slug(),
+                "account_id": p.account_id,
+                "uid": p.uid,
+                "error": err.to_string(),
+            })),
+        }
+    }
+
+    Ok(send_success(
+        "Hoàn tất tự động nhập giftcode cho tất cả game HoYoverse",
+        json!({ "total": results.len(), "results": results }),
+    ))
+}
+
+// =========================================================================
+// PER-GAME HANDLERS
+// =========================================================================
 
 async fn all_games_codes_ep(
     State(state): State<AppState>,
@@ -207,7 +385,8 @@ async fn handle_game_calendar(
     game: HoyoGame,
     Query(q): Query<LangQuery>,
 ) -> AppResult<Json<Value>> {
-    let data = get_game_calendar(&state, game, q.lang.as_deref(), q.refresh.unwrap_or(false)).await?;
+    let data =
+        get_game_calendar(&state, game, q.lang.as_deref(), q.refresh.unwrap_or(false)).await?;
     Ok(Json(json!({
         "status": "success",
         "game": game.slug(),

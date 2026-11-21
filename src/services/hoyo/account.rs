@@ -1,4 +1,5 @@
 use chrono::NaiveDateTime;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sqlx::Row;
 
@@ -39,6 +40,17 @@ pub struct AutoHoyoAccountRow {
     pub email: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveredRole {
+    pub game: String,
+    pub game_name: String,
+    pub uid: String,
+    pub nickname: String,
+    pub server: String,
+    pub server_name: String,
+    pub level: i64,
+}
+
 /// Auto-create `hoyo_accounts` table for HSR & ZZZ at startup without modifying `genshin_accounts`.
 pub async fn ensure_hoyo_accounts_table(state: &AppState) -> AppResult<()> {
     let pool = state.db()?;
@@ -72,13 +84,11 @@ pub async fn ensure_hoyo_accounts_table(state: &AppState) -> AppResult<()> {
     Ok(())
 }
 
-async fn verify_hoyo_role(
+async fn fetch_roles_for_game(
     state: &AppState,
     game: HoyoGame,
     cookie: &str,
-    uid: &str,
-    region: &str,
-) -> AppResult<String> {
+) -> AppResult<Vec<DiscoveredRole>> {
     let role_data: Value = state
         .http
         .get(format!("{}?game_biz={}", HOYO_ROLE_URL, game.game_biz()))
@@ -90,10 +100,14 @@ async fn verify_hoyo_role(
         .json()
         .await?;
 
-    if role_data.get("retcode").and_then(Value::as_i64) != Some(0) {
+    let retcode = role_data.get("retcode").and_then(Value::as_i64).unwrap_or(-1);
+    if retcode == -100 || retcode == -1071 || retcode == -10001 {
         return Err(AppError::bad_request(
-            "Xác thực HoYoLAB thất bại. Cookie không hợp lệ hoặc đã hết hạn.",
+            "Cookie HoYoLAB không hợp lệ hoặc đã hết hạn.",
         ));
+    }
+    if retcode != 0 {
+        return Ok(vec![]);
     }
 
     let roles = role_data
@@ -102,11 +116,375 @@ async fn verify_hoyo_role(
         .cloned()
         .unwrap_or_default();
 
-    let found = roles.into_iter().find(|r| {
-        let r_uid = r.get("game_uid").and_then(Value::as_str).unwrap_or("");
-        let r_reg = r.get("region").and_then(Value::as_str).unwrap_or("");
-        r_uid == uid || r_reg == region
-    });
+    Ok(roles
+        .into_iter()
+        .filter_map(|r| {
+            let uid = r.get("game_uid")?.as_str()?.to_string();
+            let region = r.get("region")?.as_str()?.to_string();
+            let nickname = r
+                .get("nickname")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let level = r.get("level").and_then(Value::as_i64).unwrap_or(0);
+            Some(DiscoveredRole {
+                game: game.slug().to_string(),
+                game_name: game.display_name().to_string(),
+                uid,
+                nickname,
+                server_name: HoyoGame::server_display_name(&region).to_string(),
+                server: region,
+                level,
+            })
+        })
+        .collect())
+}
+
+/// Discover ALL game roles across Genshin Impact, Honkai: Star Rail, and Zenless Zone Zero
+/// concurrently using a SINGLE HoYoLAB cookie.
+pub async fn discover_all_roles_from_cookie(
+    state: &AppState,
+    cookie: &str,
+    filter_games: Option<&[HoyoGame]>,
+) -> AppResult<Vec<DiscoveredRole>> {
+    if cookie.trim().is_empty() {
+        return Err(AppError::bad_request("Vui lòng cung cấp cookie HoYoLAB."));
+    }
+
+    let (gi, hsr, zzz) = tokio::try_join!(
+        fetch_roles_for_game(state, HoyoGame::Genshin, cookie),
+        fetch_roles_for_game(state, HoyoGame::Hsr, cookie),
+        fetch_roles_for_game(state, HoyoGame::Zzz, cookie),
+    )?;
+
+    let mut all = Vec::new();
+    let allow = |g: HoyoGame| {
+        filter_games
+            .map(|list| list.is_empty() || list.contains(&g))
+            .unwrap_or(true)
+    };
+
+    if allow(HoyoGame::Genshin) {
+        all.extend(gi);
+    }
+    if allow(HoyoGame::Hsr) {
+        all.extend(hsr);
+    }
+    if allow(HoyoGame::Zzz) {
+        all.extend(zzz);
+    }
+
+    Ok(all)
+}
+
+/// Link or refresh ALL discovered Genshin + HSR + ZZZ accounts for a user using ONE cookie.
+/// Existing accounts (matching user_id + uid + game) have their encrypted cookie & nickname refreshed automatically.
+pub async fn link_all_games_with_single_cookie(
+    state: &AppState,
+    user_id: i64,
+    cookie: &str,
+    auto_checkin: bool,
+    auto_redeem: bool,
+    auto_daily_note: bool,
+    filter_games: Option<&[HoyoGame]>,
+) -> AppResult<Value> {
+    let roles = discover_all_roles_from_cookie(state, cookie, filter_games).await?;
+    if roles.is_empty() {
+        return Err(AppError::bad_request(
+            "Không tìm thấy nhân vật Genshin, HSR hoặc ZZZ nào gắn với Cookie này.",
+        ));
+    }
+
+    let encrypted_cookie = encrypt_cookie(cookie, &state.config.genshin_cookie_secret)?;
+    let pool = state.db()?;
+    let mut tx = pool.begin().await?;
+
+    let mut linked_accounts = Vec::new();
+
+    for role in &roles {
+        let game = HoyoGame::from_slug(&role.game)?;
+
+        if game == HoyoGame::Genshin {
+            let existing = sqlx::query(
+                "SELECT id FROM genshin_accounts WHERE user_id = ? AND uid = ? AND status != 'deleted' FOR UPDATE",
+            )
+            .bind(user_id)
+            .bind(&role.uid)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            let (acc_id, action) = if let Some(row) = existing {
+                let id: i64 = row.try_get("id")?;
+                sqlx::query(
+                    r#"
+                    UPDATE genshin_accounts
+                    SET cookie = ?, nickname = ?, server = ?, status = 'active',
+                        auto_checkin = ?, auto_redeem = ?, auto_daily_note = ?
+                    WHERE id = ?
+                    "#,
+                )
+                .bind(&encrypted_cookie)
+                .bind(&role.nickname)
+                .bind(&role.server)
+                .bind(auto_checkin)
+                .bind(auto_redeem)
+                .bind(auto_daily_note)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+                (id, "updated")
+            } else {
+                let cnt_row = sqlx::query(
+                    "SELECT COUNT(id) AS cnt FROM genshin_accounts WHERE user_id = ? AND status != 'deleted'",
+                )
+                .bind(user_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                let is_default = cnt_row.try_get::<i64, _>("cnt").unwrap_or(0) == 0;
+
+                let res = sqlx::query(
+                    r#"
+                    INSERT INTO genshin_accounts
+                    (user_id, nickname, uid, server, cookie, is_default, auto_checkin, auto_redeem, auto_daily_note)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    "#,
+                )
+                .bind(user_id)
+                .bind(&role.nickname)
+                .bind(&role.uid)
+                .bind(&role.server)
+                .bind(&encrypted_cookie)
+                .bind(is_default)
+                .bind(auto_checkin)
+                .bind(auto_redeem)
+                .bind(auto_daily_note)
+                .execute(&mut *tx)
+                .await?;
+                (res.last_insert_id() as i64, "created")
+            };
+
+            linked_accounts.push(json!({
+                "id": acc_id,
+                "action": action,
+                "game": "genshin",
+                "game_name": "Genshin Impact",
+                "uid": role.uid,
+                "nickname": role.nickname,
+                "server": role.server,
+                "server_name": role.server_name,
+                "level": role.level,
+            }));
+        } else {
+            let existing = sqlx::query(
+                "SELECT id FROM hoyo_accounts WHERE user_id = ? AND game = ? AND uid = ? AND status != 'deleted' FOR UPDATE",
+            )
+            .bind(user_id)
+            .bind(game.slug())
+            .bind(&role.uid)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            let (acc_id, action) = if let Some(row) = existing {
+                let id: i64 = row.try_get("id")?;
+                sqlx::query(
+                    r#"
+                    UPDATE hoyo_accounts
+                    SET cookie = ?, nickname = ?, server = ?, status = 'active',
+                        auto_checkin = ?, auto_redeem = ?, auto_daily_note = ?
+                    WHERE id = ?
+                    "#,
+                )
+                .bind(&encrypted_cookie)
+                .bind(&role.nickname)
+                .bind(&role.server)
+                .bind(auto_checkin)
+                .bind(auto_redeem)
+                .bind(auto_daily_note)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+                (id, "updated")
+            } else {
+                let cnt_row = sqlx::query(
+                    "SELECT COUNT(id) AS cnt FROM hoyo_accounts WHERE user_id = ? AND game = ? AND status != 'deleted'",
+                )
+                .bind(user_id)
+                .bind(game.slug())
+                .fetch_one(&mut *tx)
+                .await?;
+                let is_default = cnt_row.try_get::<i64, _>("cnt").unwrap_or(0) == 0;
+
+                let res = sqlx::query(
+                    r#"
+                    INSERT INTO hoyo_accounts
+                    (user_id, game, nickname, uid, server, cookie, is_default, auto_checkin, auto_redeem, auto_daily_note)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    "#,
+                )
+                .bind(user_id)
+                .bind(game.slug())
+                .bind(&role.nickname)
+                .bind(&role.uid)
+                .bind(&role.server)
+                .bind(&encrypted_cookie)
+                .bind(is_default)
+                .bind(auto_checkin)
+                .bind(auto_redeem)
+                .bind(auto_daily_note)
+                .execute(&mut *tx)
+                .await?;
+                (res.last_insert_id() as i64, "created")
+            };
+
+            linked_accounts.push(json!({
+                "id": acc_id,
+                "action": action,
+                "game": game.slug(),
+                "game_name": game.display_name(),
+                "uid": role.uid,
+                "nickname": role.nickname,
+                "server": role.server,
+                "server_name": role.server_name,
+                "level": role.level,
+            }));
+        }
+    }
+
+    tx.commit().await?;
+
+    Ok(json!({
+        "total_linked": linked_accounts.len(),
+        "accounts": linked_accounts,
+    }))
+}
+
+/// Update the stored HoYoLAB cookie across ALL active accounts (Genshin + HSR + ZZZ) of a user in one shot.
+pub async fn update_shared_cookie_for_user(
+    state: &AppState,
+    user_id: i64,
+    new_cookie: &str,
+) -> AppResult<Value> {
+    let roles = discover_all_roles_from_cookie(state, new_cookie, None).await?;
+    if roles.is_empty() {
+        return Err(AppError::bad_request(
+            "Cookie mới không hợp lệ hoặc không có nhân vật HoYoverse nào.",
+        ));
+    }
+
+    let encrypted = encrypt_cookie(new_cookie, &state.config.genshin_cookie_secret)?;
+    let pool = state.db()?;
+    let mut tx = pool.begin().await?;
+
+    let gi_res = sqlx::query(
+        "UPDATE genshin_accounts SET cookie = ?, status = 'active' WHERE user_id = ? AND status != 'deleted'",
+    )
+    .bind(&encrypted)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+
+    let hoyo_res = sqlx::query(
+        "UPDATE hoyo_accounts SET cookie = ?, status = 'active' WHERE user_id = ? AND status != 'deleted'",
+    )
+    .bind(&encrypted)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    Ok(json!({
+        "genshin_updated": gi_res.rows_affected(),
+        "hsr_zzz_updated": hoyo_res.rows_affected(),
+        "total_updated": gi_res.rows_affected() + hoyo_res.rows_affected(),
+        "discovered_roles": roles,
+    }))
+}
+
+/// Get all accounts for a user across Genshin, HSR, and ZZZ in one unified payload.
+pub async fn get_all_user_accounts(state: &AppState, user_id: i64) -> AppResult<Value> {
+    let (gi, hsr, zzz) = tokio::try_join!(
+        get_accounts(state, HoyoGame::Genshin, user_id),
+        get_accounts(state, HoyoGame::Hsr, user_id),
+        get_accounts(state, HoyoGame::Zzz, user_id),
+    )?;
+
+    Ok(json!({
+        "total": gi.len() + hsr.len() + zzz.len(),
+        "genshin": gi,
+        "hsr": hsr,
+        "zzz": zzz,
+    }))
+}
+
+/// Get decrypted ready payloads for ALL active accounts of a user across Genshin, HSR, and ZZZ.
+pub async fn get_all_ready_payloads_for_user(
+    state: &AppState,
+    user_id: i64,
+) -> AppResult<Vec<ReadyHoyoPayload>> {
+    let pool = state.db()?;
+    let mut list = Vec::new();
+
+    let gi_rows = sqlx::query(
+        "SELECT id, cookie, uid, server, nickname FROM genshin_accounts WHERE user_id = ? AND status = 'active'",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+
+    for r in gi_rows {
+        let enc: String = r.try_get("cookie")?;
+        if let Ok(cookie) = decrypt_cookie(&enc, &state.config.genshin_cookie_secret) {
+            list.push(ReadyHoyoPayload {
+                account_id: r.try_get("id")?,
+                game: HoyoGame::Genshin,
+                cookie,
+                uid: r.try_get("uid")?,
+                server: r.try_get("server")?,
+                nickname: r.try_get::<Option<String>, _>("nickname")?.unwrap_or_default(),
+            });
+        }
+    }
+
+    let hoyo_rows = sqlx::query(
+        "SELECT id, game, cookie, uid, server, nickname FROM hoyo_accounts WHERE user_id = ? AND status = 'active'",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+
+    for r in hoyo_rows {
+        let g_str: String = r.try_get("game").unwrap_or_default();
+        let Ok(game) = HoyoGame::from_slug(&g_str) else {
+            continue;
+        };
+        let enc: String = r.try_get("cookie")?;
+        if let Ok(cookie) = decrypt_cookie(&enc, &state.config.genshin_cookie_secret) {
+            list.push(ReadyHoyoPayload {
+                account_id: r.try_get("id")?,
+                game,
+                cookie,
+                uid: r.try_get("uid")?,
+                server: r.try_get("server")?,
+                nickname: r.try_get::<Option<String>, _>("nickname")?.unwrap_or_default(),
+            });
+        }
+    }
+
+    Ok(list)
+}
+
+async fn verify_hoyo_role(
+    state: &AppState,
+    game: HoyoGame,
+    cookie: &str,
+    uid: &str,
+    region: &str,
+) -> AppResult<String> {
+    let roles = fetch_roles_for_game(state, game, cookie).await?;
+    let found = roles
+        .into_iter()
+        .find(|r| r.uid == uid || r.server == region);
 
     let Some(role) = found else {
         return Err(AppError::bad_request(format!(
@@ -117,11 +495,7 @@ async fn verify_hoyo_role(
         )));
     };
 
-    Ok(role
-        .get("nickname")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string())
+    Ok(role.nickname)
 }
 
 pub async fn add_account(

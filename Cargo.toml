@@ -1,6 +1,6 @@
 [package]
 name = "elyriax-api"
-version = "3.1.0"
+version = "3.2.0"
 edition = "2021"
 description = "Elyriax High-Performance Backend API written in Rust (Axum + Tokio + SQLx) with full Genshin Impact, HSR & ZZZ Automation"
 authors = ["Nvirya <admin@elyriax.com>"]
