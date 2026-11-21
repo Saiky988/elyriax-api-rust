@@ -1,0 +1,71 @@
+[package]
+name = "elyriax-api"
+version = "3.0.0"
+edition = "2021"
+description = "Elyriax High-Performance Backend API written in Rust (Axum + Tokio + SQLx)"
+authors = ["Nvirya <admin@elyriax.com>"]
+
+[dependencies]
+# Async Runtime
+tokio = { version = "1.43", features = ["full"] }
+futures-util = "0.3"
+
+# Web Framework & Middleware
+axum = { version = "0.8", features = ["multipart", "ws", "macros"] }
+axum-extra = { version = "0.10", features = ["cookie"] }
+tower = { version = "0.5", features = ["limit", "timeout"] }
+tower-http = { version = "0.6", features = ["cors", "compression-gzip", "compression-br", "trace", "limit"] }
+
+# Database (MySQL Async Pool)
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "mysql", "chrono", "bigdecimal", "json", "macros"] }
+bigdecimal = { version = "0.4", features = ["serde"] }
+
+# Serialization & JSON
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# HTTP Client (Pooled, HTTP/2, Rustls)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "brotli", "http2"] }
+
+# Cryptography & Auth (100% compatible with legacy AES-256-CBC + JWT HS256)
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.8"
+base64 = "0.22"
+jsonwebtoken = "9.3"
+
+# HTML Parsing (EVN & Genshin Wiki Fallback)
+scraper = "0.22"
+regex = "1.11"
+url = "2.5"
+urlencoding = "2.1"
+
+# Image Processing (Dynamic VietQR + Logo Overlay)
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+# Archive (Minecraft Modpack ZIP Builder)
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+
+# System Monitoring (Host Realtime Metrics)
+sysinfo = "0.33"
+
+# Concurrency, Caching & Utilities
+dashmap = "6.1"
+chrono = { version = "0.4", features = ["serde"] }
+time = "0.3"
+dotenvy = "0.15"
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Structured Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
