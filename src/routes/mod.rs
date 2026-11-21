@@ -8,6 +8,7 @@ pub mod file_up;
 pub mod genshin;
 pub mod go;
 pub mod host;
+pub mod hoyo;
 pub mod order;
 pub mod payment;
 pub mod product;
@@ -19,7 +20,7 @@ use axum::{routing::get, Json, Router};
 use chrono::Utc;
 use serde_json::{json, Value};
 
-use crate::state::AppState;
+use crate::{services::hoyo::HoyoGame, state::AppState};
 
 async fn health_check(
     axum::extract::State(state): axum::extract::State<AppState>,
@@ -36,6 +37,7 @@ async fn health_check(
         "service": "elyriax-api",
         "version": env!("CARGO_PKG_VERSION"),
         "runtime": "rust",
+        "supported_games": ["genshin", "hsr", "zzz"],
         "database": if db_ok { "connected" } else { "disconnected" },
         "timestamp": Utc::now().to_rfc3339(),
     }))
@@ -57,6 +59,9 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/v1/admin/scheduler", admin_scheduler::router())
         .nest("/v1/email", email::router())
         .nest("/v1/genshin", genshin::router())
+        .nest("/v1/hsr", hoyo::game_router(HoyoGame::Hsr))
+        .nest("/v1/zzz", hoyo::game_router(HoyoGame::Zzz))
+        .nest("/v1/hoyo", hoyo::router())
         .nest("/v1/evn", evn::router())
         .merge(go::router())
         .merge(file_up::router())

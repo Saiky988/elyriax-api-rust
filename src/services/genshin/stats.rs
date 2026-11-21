@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 
 use crate::{
     error::{AppError, AppResult},
+    services::hoyo::generate_os_ds,
     state::AppState,
 };
 
@@ -26,6 +27,7 @@ pub async fn get_role_and_stats(
         .http
         .get(&url)
         .header("Cookie", cookie)
+        .header("DS", generate_os_ds())
         .header("Accept", "application/json, text/plain, */*")
         .header("x-rpc-client_type", "5")
         .header("x-rpc-app_version", "1.5.0")

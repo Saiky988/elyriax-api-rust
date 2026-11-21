@@ -24,7 +24,10 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use crate::{
     core::{config::Config, db::init_db_pool},
     routes::{build_router, host::spawn_metrics_emitter},
-    services::{genshin::redeem::load_redeem_history, scheduler::spawn_scheduler},
+    services::{
+        hoyo::{account::ensure_hoyo_accounts_table, redeem::load_redeem_history},
+        scheduler::spawn_scheduler,
+    },
     state::{AppState, RedeemHistoryStore, SchedulerState, SYSTEM_HISTORY_LIMIT},
 };
 
@@ -101,7 +104,9 @@ async fn main() -> anyhow::Result<()> {
         system_history: Arc::new(RwLock::new(VecDeque::with_capacity(SYSTEM_HISTORY_LIMIT))),
         metrics_tx,
         qr_logo_cache: Arc::new(RwLock::new(None)),
-        genshin_codes_cache: Arc::new(RwLock::new(None)),
+        hoyo_codes_cache: Arc::new(DashMap::new()),
+        hoyo_calendar_cache: Arc::new(DashMap::new()),
+        hoyo_news_cache: Arc::new(DashMap::new()),
         evn_units_cache: Arc::new(DashMap::new()),
         go_links_lock: Arc::new(RwLock::new(())),
         file_db_lock: Arc::new(RwLock::new(())),
@@ -109,10 +114,17 @@ async fn main() -> anyhow::Result<()> {
         scheduler: Arc::new(SchedulerState::default()),
     };
 
-    // Hydrate Genshin redeem history cache from disk
+    // Auto-ensure multi-game `hoyo_accounts` table for HSR & ZZZ (keeps `genshin_accounts` intact)
+    if state.db.is_some() {
+        if let Err(err) = ensure_hoyo_accounts_table(&state).await {
+            tracing::warn!(error = %err, "[Database] Could not auto-create hoyo_accounts table");
+        }
+    }
+
+    // Hydrate multi-game HoYo redeem history cache from disk
     load_redeem_history(&state).await;
 
-    // Start background workers (metrics emitter + Genshin scheduler)
+    // Start background workers (metrics emitter + multi-game HoYo scheduler)
     spawn_metrics_emitter(state.clone());
     spawn_scheduler(state.clone());
 
@@ -135,13 +147,17 @@ async fn main() -> anyhow::Result<()> {
 
     let app = build_router(state.clone())
         .layer(CompressionLayer::new())
-        .layer(RequestBodyLimitLayer::new(100 * 1024 * 1024)) // 100 MiB upload cap
+        .layer(RequestBodyLimitLayer::new(100 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .layer(cors);
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
     let listener = TcpListener::bind(addr).await?;
-    tracing::info!("Elyriax API v{} (Rust) listening on http://{}", env!("CARGO_PKG_VERSION"), addr);
+    tracing::info!(
+        "Elyriax API v{} (Rust | Genshin + HSR + ZZZ) listening on http://{}",
+        env!("CARGO_PKG_VERSION"),
+        addr
+    );
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

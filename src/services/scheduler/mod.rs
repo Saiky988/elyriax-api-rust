@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -9,14 +9,15 @@ use crate::{
     core::security::decrypt_cookie,
     services::{
         email::{render_template, send_notification_email},
-        genshin::{
+        hoyo::{
             account::{
-                get_auto_checkin_accounts, get_auto_daily_note_accounts, get_auto_redeem_accounts,
-                update_checkin_status, update_daily_note_timestamp,
+                get_all_auto_checkin_accounts, get_all_auto_daily_note_accounts,
+                get_all_auto_redeem_accounts, update_checkin_status, update_daily_note_timestamp,
             },
             checkin::check_in_daily,
-            daily_note::get_daily_note,
+            game_record::get_daily_note,
             redeem::auto_redeem_for_account,
+            HoyoGame,
         },
     },
     state::AppState,
@@ -35,6 +36,7 @@ fn already_processed_today(last_checkin_at: Option<NaiveDateTime>) -> bool {
     dt.date() == today_vn
 }
 
+/// Runs daily check-in across ALL 3 games: Genshin Impact, Honkai: Star Rail, and Zenless Zone Zero.
 pub async fn run_genshin_auto_checkin(state: AppState) {
     if state
         .scheduler
@@ -42,21 +44,21 @@ pub async fn run_genshin_auto_checkin(state: AppState) {
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
-        tracing::info!("[GENSHIN CHECKIN] Already running, skipping overlapping trigger");
+        tracing::info!("[HOYO CHECKIN] Already running, skipping overlapping trigger");
         return;
     }
 
-    tracing::info!("[GENSHIN CHECKIN] Scheduler started");
-    let accounts = match get_auto_checkin_accounts(&state).await {
+    tracing::info!("[HOYO CHECKIN] Multi-game scheduler started (Genshin, HSR, ZZZ)");
+    let accounts = match get_all_auto_checkin_accounts(&state).await {
         Ok(list) => list,
         Err(e) => {
-            tracing::error!(error = %e, "[GENSHIN CHECKIN] Cannot fetch accounts");
+            tracing::error!(error = %e, "[HOYO CHECKIN] Cannot fetch accounts");
             state.scheduler.checkin_running.store(false, Ordering::SeqCst);
             return;
         }
     };
 
-    tracing::info!(count = accounts.len(), "[GENSHIN CHECKIN] Accounts queued");
+    tracing::info!(count = accounts.len(), "[HOYO CHECKIN] Accounts queued");
 
     for acc in accounts {
         if already_processed_today(acc.last_checkin_at) {
@@ -66,13 +68,13 @@ pub async fn run_genshin_auto_checkin(state: AppState) {
         let cookie = match decrypt_cookie(&acc.cookie_encrypted, &state.config.genshin_cookie_secret) {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(account_id = acc.id, error = %e, "[GENSHIN CHECKIN] Decrypt failed");
-                let _ = update_checkin_status(&state, acc.id, "cookie_expired").await;
+                tracing::warn!(game = acc.game.slug(), account_id = acc.id, error = %e, "[HOYO CHECKIN] Decrypt failed");
+                let _ = update_checkin_status(&state, acc.game, acc.id, "cookie_expired").await;
                 continue;
             }
         };
 
-        match check_in_daily(&state, &cookie, &acc.server).await {
+        match check_in_daily(&state, acc.game, &cookie, &acc.server).await {
             Ok(result) => {
                 let risk_code = result.get("risk_code").and_then(Value::as_i64).unwrap_or(0);
                 let claimed = result.get("claimed").and_then(Value::as_bool).unwrap_or(false);
@@ -84,7 +86,7 @@ pub async fn run_genshin_auto_checkin(state: AppState) {
                     "already_claimed"
                 };
 
-                let _ = update_checkin_status(&state, acc.id, status_str).await;
+                let _ = update_checkin_status(&state, acc.game, acc.id, status_str).await;
 
                 if status_str == "success" {
                     if let Some(ref email) = acc.email {
@@ -155,7 +157,8 @@ pub async fn run_genshin_auto_checkin(state: AppState) {
                             );
                             if !html.is_empty() {
                                 let subject = format!(
-                                    "[Genshin] Điểm danh hàng ngày thành công — {}",
+                                    "[{}] Điểm danh hàng ngày thành công — {}",
+                                    acc.game.display_name(),
                                     nickname
                                 );
                                 let _ = send_notification_email(
@@ -182,8 +185,8 @@ pub async fn run_genshin_auto_checkin(state: AppState) {
                 } else {
                     "error"
                 };
-                tracing::error!(account_id = acc.id, uid = %acc.uid, status = status_str, error = %err, "[GENSHIN CHECKIN] Failed");
-                let _ = update_checkin_status(&state, acc.id, status_str).await;
+                tracing::error!(game = acc.game.slug(), account_id = acc.id, uid = %acc.uid, status = status_str, error = %err, "[HOYO CHECKIN] Failed");
+                let _ = update_checkin_status(&state, acc.game, acc.id, status_str).await;
             }
         }
 
@@ -192,9 +195,10 @@ pub async fn run_genshin_auto_checkin(state: AppState) {
 
     *state.scheduler.last_checkin_run.write().await = Some(now_vn().to_rfc3339());
     state.scheduler.checkin_running.store(false, Ordering::SeqCst);
-    tracing::info!("[GENSHIN CHECKIN] Scheduler finished");
+    tracing::info!("[HOYO CHECKIN] Multi-game scheduler finished");
 }
 
+/// Runs auto-redeem across ALL 3 games: Genshin Impact, Honkai: Star Rail, and Zenless Zone Zero.
 pub async fn run_genshin_auto_redeem(state: AppState) {
     if state
         .scheduler
@@ -202,15 +206,15 @@ pub async fn run_genshin_auto_redeem(state: AppState) {
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
-        tracing::info!("[GENSHIN AUTO-REDEEM] Already running, skipping overlapping trigger");
+        tracing::info!("[HOYO AUTO-REDEEM] Already running, skipping overlapping trigger");
         return;
     }
 
-    tracing::info!("[GENSHIN AUTO-REDEEM] Scheduler started");
-    let accounts = match get_auto_redeem_accounts(&state).await {
+    tracing::info!("[HOYO AUTO-REDEEM] Multi-game scheduler started (Genshin, HSR, ZZZ)");
+    let accounts = match get_all_auto_redeem_accounts(&state).await {
         Ok(list) => list,
         Err(e) => {
-            tracing::error!(error = %e, "[GENSHIN AUTO-REDEEM] Cannot fetch accounts");
+            tracing::error!(error = %e, "[HOYO AUTO-REDEEM] Cannot fetch accounts");
             state.scheduler.redeem_running.store(false, Ordering::SeqCst);
             return;
         }
@@ -218,38 +222,44 @@ pub async fn run_genshin_auto_redeem(state: AppState) {
 
     let mut total_redeemed: usize = 0;
     let mut processed_accounts: usize = 0;
+    let mut refreshed_games: HashSet<HoyoGame> = HashSet::new();
+    let mut per_game_redeemed: HashMap<&'static str, usize> = HashMap::new();
 
-    for (idx, acc) in accounts.iter().enumerate() {
+    for acc in &accounts {
         let cookie = match decrypt_cookie(&acc.cookie_encrypted, &state.config.genshin_cookie_secret) {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(account_id = acc.id, error = %e, "[GENSHIN AUTO-REDEEM] Decrypt failed");
+                tracing::warn!(game = acc.game.slug(), account_id = acc.id, error = %e, "[HOYO AUTO-REDEEM] Decrypt failed");
                 continue;
             }
         };
 
-        // Only force-refresh code feeds on the first account in the batch; subsequent accounts use the 10m TTL cache
+        let should_refresh = refreshed_games.insert(acc.game);
+
         match auto_redeem_for_account(
             &state,
+            acc.game,
             acc.id,
             &cookie,
             &acc.uid,
             &acc.server,
             &acc.nickname,
             acc.email.as_deref(),
-            idx == 0,
+            should_refresh,
         )
         .await
         {
             Ok(summary) => {
                 processed_accounts += 1;
-                total_redeemed += summary
+                let count = summary
                     .get("redeemed_count")
                     .and_then(Value::as_u64)
                     .unwrap_or(0) as usize;
+                total_redeemed += count;
+                *per_game_redeemed.entry(acc.game.slug()).or_insert(0) += count;
             }
             Err(err) => {
-                tracing::warn!(account_id = acc.id, uid = %acc.uid, error = %err, "[GENSHIN AUTO-REDEEM] Account error");
+                tracing::warn!(game = acc.game.slug(), account_id = acc.id, uid = %acc.uid, error = %err, "[HOYO AUTO-REDEEM] Account error");
             }
         }
 
@@ -262,15 +272,17 @@ pub async fn run_genshin_auto_redeem(state: AppState) {
         "ran_at": now_str,
         "accounts_processed": processed_accounts,
         "total_codes_redeemed": total_redeemed,
+        "by_game": per_game_redeemed,
     }));
     state.scheduler.redeem_running.store(false, Ordering::SeqCst);
     tracing::info!(
         processed_accounts,
         total_redeemed,
-        "[GENSHIN AUTO-REDEEM] Scheduler finished"
+        "[HOYO AUTO-REDEEM] Multi-game scheduler finished"
     );
 }
 
+/// Runs daily-note sync across ALL 3 games: Genshin Impact, Honkai: Star Rail, and Zenless Zone Zero.
 pub async fn run_genshin_auto_daily_note(state: AppState) {
     if state
         .scheduler
@@ -281,10 +293,10 @@ pub async fn run_genshin_auto_daily_note(state: AppState) {
         return;
     }
 
-    let accounts = match get_auto_daily_note_accounts(&state).await {
+    let accounts = match get_all_auto_daily_note_accounts(&state).await {
         Ok(list) => list,
         Err(e) => {
-            tracing::error!(error = %e, "[GENSHIN DAILY-NOTE] Cannot fetch accounts");
+            tracing::error!(error = %e, "[HOYO DAILY-NOTE] Cannot fetch accounts");
             state
                 .scheduler
                 .daily_note_running
@@ -295,9 +307,9 @@ pub async fn run_genshin_auto_daily_note(state: AppState) {
 
     for acc in accounts {
         if let Ok(cookie) = decrypt_cookie(&acc.cookie_encrypted, &state.config.genshin_cookie_secret) {
-            if let Ok(res) = get_daily_note(&state, &cookie, &acc.uid, &acc.server).await {
+            if let Ok(res) = get_daily_note(&state, acc.game, &cookie, &acc.uid, &acc.server).await {
                 if res.get("ok").and_then(Value::as_bool) == Some(true) {
-                    let _ = update_daily_note_timestamp(&state, acc.id).await;
+                    let _ = update_daily_note_timestamp(&state, acc.game, acc.id).await;
                 }
             }
         }
@@ -313,6 +325,7 @@ pub async fn run_genshin_auto_daily_note(state: AppState) {
 
 pub async fn get_scheduler_status(state: &AppState) -> Value {
     json!({
+        "games": ["genshin", "hsr", "zzz"],
         "checkin_running": state.scheduler.checkin_running.load(Ordering::SeqCst),
         "redeem_running": state.scheduler.redeem_running.load(Ordering::SeqCst),
         "daily_note_running": state.scheduler.daily_note_running.load(Ordering::SeqCst),
@@ -326,7 +339,7 @@ pub async fn get_scheduler_status(state: &AppState) -> Value {
 
 pub fn spawn_scheduler(state: AppState) {
     tokio::spawn(async move {
-        tracing::info!("[SCHEDULER] Booting Genshin cron loop (Asia/Ho_Chi_Minh)...");
+        tracing::info!("[SCHEDULER] Booting multi-game HoYo cron loop (Genshin, HSR, ZZZ | Asia/Ho_Chi_Minh)...");
         let mut last_checkin_slot: Option<(NaiveDate, u32)> = None;
         let mut last_redeem_slot: Option<(NaiveDate, u32)> = None;
         let mut last_note_slot: Option<(NaiveDate, u32, u32)> = None;
@@ -349,7 +362,7 @@ pub fn spawn_scheduler(state: AppState) {
                 }
             }
 
-            // 2. Auto Redeem Code every 3 hours (00:15, 03:15, 06:15, 09:15, 12:00, 15:15, 18:15, 20:00, 21:15)
+            // 2. Auto Redeem Code every 3 hours + 12:00 & 20:00 VN
             let is_redeem_window = (matches!(hour, 12 | 20) && minute == 0)
                 || (hour % 3 == 0 && minute == 15);
             if is_redeem_window {
@@ -370,7 +383,6 @@ pub fn spawn_scheduler(state: AppState) {
                     tokio::spawn(async move { run_genshin_auto_daily_note(st).await });
                 }
             }
-
         }
     });
 }

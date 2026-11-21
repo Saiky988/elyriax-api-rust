@@ -1,8 +1,8 @@
 [package]
 name = "elyriax-api"
-version = "3.0.0"
+version = "3.1.0"
 edition = "2021"
-description = "Elyriax High-Performance Backend API written in Rust (Axum + Tokio + SQLx)"
+description = "Elyriax High-Performance Backend API written in Rust (Axum + Tokio + SQLx) with full Genshin Impact, HSR & ZZZ Automation"
 authors = ["Nvirya <admin@elyriax.com>"]
 
 [dependencies]
@@ -27,10 +27,11 @@ serde_json = "1.0"
 # HTTP Client (Pooled, HTTP/2, Rustls)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "brotli", "http2"] }
 
-# Cryptography & Auth (100% compatible with legacy AES-256-CBC + JWT HS256)
+# Cryptography & Auth (100% compatible with legacy AES-256-CBC + JWT HS256 + HoYoLAB DS MD5)
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 sha2 = "0.10"
+md-5 = "0.10"
 hex = "0.4"
 rand = "0.8"
 base64 = "0.22"

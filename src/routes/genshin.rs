@@ -29,6 +29,10 @@ use crate::{
             redeem::{auto_redeem_for_account, get_account_redeem_history, redeem_code},
             stats::get_role_and_stats,
         },
+        hoyo::{
+            feed::{get_game_calendar, get_game_news},
+            HoyoGame,
+        },
         scheduler::run_genshin_auto_redeem,
     },
     state::AppState,
@@ -37,6 +41,9 @@ use crate::{
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(genshin_get_router).post(genshin_post_router))
+        .route("/codes", get(get_genshin_codes_ep))
+        .route("/calendar", get(get_genshin_calendar))
+        .route("/news/{kind}", get(get_genshin_news))
         .route("/role-stats", post(post_role_stats))
         .route("/daily-note", post(post_daily_note))
         .route("/stats", get(get_default_stats))
@@ -53,7 +60,7 @@ pub fn router() -> Router<AppState> {
         .route("/accounts/{account_id}/daily-note", get(get_account_daily_note))
         .route("/accounts/{account_id}/checkin-list", get(get_account_checkin_list))
         .route("/accounts/{account_id}/checkin", post(post_account_checkin))
-        // NEW: Auto Redeem Code Genshin Endpoints
+        // Auto Redeem Code Genshin Endpoints
         .route("/accounts/{account_id}/redeem", post(post_account_redeem))
         .route("/accounts/{account_id}/auto-redeem", post(post_account_auto_redeem))
         .route("/accounts/{account_id}/redeem-history", get(get_account_redeem_history_ep))
@@ -65,6 +72,13 @@ struct GenshinQuery {
     #[serde(rename = "type")]
     query_type: Option<String>,
     refresh: Option<bool>,
+    lang: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LangQuery {
+    lang: Option<String>,
+    refresh: Option<bool>,
 }
 
 async fn genshin_get_router(
@@ -73,9 +87,27 @@ async fn genshin_get_router(
 ) -> AppResult<Response> {
     match q.query_type.as_deref() {
         Some("banner") => {
+            // Try live banners from hoyoverse-api first, fall back to local data/banners.json
+            let live = get_game_calendar(&state, HoyoGame::Genshin, q.lang.as_deref(), q.refresh.unwrap_or(false))
+                .await
+                .ok()
+                .and_then(|cal| cal.get("banners").cloned())
+                .filter(|b| b.as_array().map(|a| !a.is_empty()).unwrap_or(false));
+
+            if let Some(live_banners) = live {
+                return Ok(Json(json!({
+                    "status": "success",
+                    "source": "api.ennead.cc",
+                    "timestamp": Utc::now().to_rfc3339(),
+                    "data": live_banners,
+                }))
+                .into_response());
+            }
+
             let banners = get_banners(&state).await?;
             Ok(Json(json!({
                 "status": "success",
+                "source": "local",
                 "timestamp": Utc::now().to_rfc3339(),
                 "data": banners,
             }))
@@ -101,6 +133,47 @@ async fn genshin_get_router(
         )
             .into_response()),
     }
+}
+
+async fn get_genshin_calendar(
+    State(state): State<AppState>,
+    Query(q): Query<LangQuery>,
+) -> AppResult<Json<Value>> {
+    let data = get_game_calendar(
+        &state,
+        HoyoGame::Genshin,
+        q.lang.as_deref(),
+        q.refresh.unwrap_or(false),
+    )
+    .await?;
+    Ok(Json(json!({
+        "status": "success",
+        "game": "genshin",
+        "timestamp": Utc::now().to_rfc3339(),
+        "data": data,
+    })))
+}
+
+async fn get_genshin_news(
+    State(state): State<AppState>,
+    Path(kind): Path<String>,
+    Query(q): Query<LangQuery>,
+) -> AppResult<Json<Value>> {
+    let data = get_game_news(
+        &state,
+        HoyoGame::Genshin,
+        &kind,
+        q.lang.as_deref(),
+        q.refresh.unwrap_or(false),
+    )
+    .await?;
+    Ok(Json(json!({
+        "status": "success",
+        "game": "genshin",
+        "kind": kind,
+        "timestamp": Utc::now().to_rfc3339(),
+        "data": data,
+    })))
 }
 
 async fn genshin_post_router(
@@ -274,7 +347,6 @@ async fn get_account_redeem_history_ep(
     user: AuthUser,
     Path(account_id): Path<i64>,
 ) -> AppResult<Json<Value>> {
-    // Verify ownership first
     let _ = get_account_by_id(&state, user.id, account_id).await?;
     let history = get_account_redeem_history(&state, account_id).await;
     Ok(send_success("Lấy lịch sử nhập giftcode thành công", history))
@@ -288,7 +360,7 @@ async fn trigger_global_auto_redeem(
     tokio::spawn(async move {
         run_genshin_auto_redeem(st).await;
     });
-    send_success_empty("Đã kích hoạt tiến trình Auto Redeem Code Genshin toàn hệ thống")
+    send_success_empty("Đã kích hoạt tiến trình Auto Redeem Code toàn hệ thống (Genshin, HSR, ZZZ)")
 }
 
 #[derive(Deserialize)]
@@ -351,4 +423,19 @@ async fn delete_account_ep(
 ) -> AppResult<Json<Value>> {
     delete_account(&state, user.id, account_id).await?;
     Ok(send_success_empty("Đã xóa tài khoản khỏi hệ thống"))
+}
+
+async fn get_genshin_codes_ep(
+    State(state): State<AppState>,
+    Query(q): Query<LangQuery>,
+) -> AppResult<Json<Value>> {
+    let cards = get_all_codes(&state, q.refresh.unwrap_or(false)).await?;
+    let total_codes: usize = cards.iter().map(|c| c.codes.len()).sum();
+    Ok(Json(json!({
+        "status": "success",
+        "game": "genshin",
+        "timestamp": Utc::now().to_rfc3339(),
+        "count": total_codes,
+        "cards": cards,
+    })))
 }

@@ -4,6 +4,7 @@ pub mod cart;
 pub mod email;
 pub mod genshin;
 pub mod go;
+pub mod hoyo;
 pub mod order;
 pub mod product;
 pub mod scheduler;

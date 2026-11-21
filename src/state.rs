@@ -1,8 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{
-    atomic::AtomicBool,
-    Arc,
-};
+use std::sync::{atomic::AtomicBool, Arc};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -55,19 +52,20 @@ pub struct SchedulerState {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RedeemHistoryStore {
-    /// Map of account_id (string) -> set of already attempted/claimed codes
+    /// Map of "{game}:{account_id}" -> set of already attempted/claimed/regional-skipped codes
     #[serde(default)]
     pub accounts: HashMap<String, HashSet<String>>,
-    /// Codes confirmed globally expired or invalid so all accounts skip them
+    /// Codes confirmed globally expired or invalid ("{game}:{code}") so all accounts skip them
     #[serde(default)]
     pub global_expired: HashSet<String>,
-    /// Detailed recent redeem logs per account (bounded to 50 per account)
+    /// Detailed recent redeem logs per "{game}:{account_id}" (bounded to 50 per account)
     #[serde(default)]
     pub logs: HashMap<String, Vec<RedeemLogEntry>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedeemLogEntry {
+    pub game: String,
     pub code: String,
     pub status: String,
     pub message: String,
@@ -88,7 +86,9 @@ pub struct AppState {
 
     // In-memory TTL caches
     pub qr_logo_cache: Arc<RwLock<Option<Vec<u8>>>>,
-    pub genshin_codes_cache: Arc<RwLock<Option<CachedValue<Value>>>>,
+    pub hoyo_codes_cache: Arc<DashMap<String, CachedValue<Value>>>,
+    pub hoyo_calendar_cache: Arc<DashMap<String, CachedValue<Value>>>,
+    pub hoyo_news_cache: Arc<DashMap<String, CachedValue<Value>>>,
     pub evn_units_cache: Arc<DashMap<String, CachedValue<Value>>>,
 
     // Local JSON-backed stores protected by async RwLock

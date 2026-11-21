@@ -1,7 +1,7 @@
 use chrono::{Duration, FixedOffset, Utc};
 use serde_json::{json, Value};
 
-use crate::{error::AppResult, state::AppState};
+use crate::{error::AppResult, services::hoyo::generate_os_ds, state::AppState};
 
 fn calculate_estimated_time(seconds_remaining: i64) -> String {
     if seconds_remaining <= 0 {
@@ -54,6 +54,7 @@ pub async fn get_daily_note(
         .http
         .get(&url)
         .header("Cookie", cookie)
+        .header("DS", generate_os_ds())
         .header("Accept", "application/json, text/plain, */*")
         .header(
             "User-Agent",

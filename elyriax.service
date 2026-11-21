@@ -5,9 +5,9 @@ After=network.target mysql.service
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/root/Elyriax-api
-EnvironmentFile=/root/Elyriax-api/.env
-ExecStart=/root/Elyriax-api/target/release/elyriax-api
+WorkingDirectory=/root/elyriax-api-rust
+EnvironmentFile=/root/elyriax-api-rust/.env
+ExecStart=/root/elyriax-api-rust/target/release/elyriax-api
 
 Restart=always
 RestartSec=3
