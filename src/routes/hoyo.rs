@@ -411,7 +411,6 @@ async fn handle_game_news(
         &kind,
         q.lang.as_deref(),
         q.refresh.unwrap_or(false),
-        q.force.unwrap_or(false),
     )
     .await?;
     Ok(Json(json!({

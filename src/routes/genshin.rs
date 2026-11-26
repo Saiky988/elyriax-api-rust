@@ -144,7 +144,6 @@ async fn get_genshin_calendar(
         HoyoGame::Genshin,
         q.lang.as_deref(),
         q.refresh.unwrap_or(false),
-        q.force.unwrap_or(false),
     )
     .await?;
     Ok(Json(json!({
@@ -166,7 +165,6 @@ async fn get_genshin_news(
         &kind,
         q.lang.as_deref(),
         q.refresh.unwrap_or(false),
-        q.force.unwrap_or(false),
     )
     .await?;
     Ok(Json(json!({
