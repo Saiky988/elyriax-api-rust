@@ -16,6 +16,7 @@ pub async fn redeem_code(
     hoyo_redeem::redeem_code(state, HoyoGame::Genshin, cookie, server, code, uid_hint).await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn auto_redeem_for_account(
     state: &AppState,
     account_id: i64,
@@ -25,6 +26,7 @@ pub async fn auto_redeem_for_account(
     nickname: &str,
     notify_email: Option<&str>,
     force_refresh_codes: bool,
+    force_recheck: bool,
 ) -> AppResult<Value> {
     hoyo_redeem::auto_redeem_for_account(
         state,
@@ -36,6 +38,7 @@ pub async fn auto_redeem_for_account(
         nickname,
         notify_email,
         force_refresh_codes,
+        force_recheck,
     )
     .await
 }

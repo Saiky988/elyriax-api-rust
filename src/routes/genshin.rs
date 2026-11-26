@@ -144,6 +144,7 @@ async fn get_genshin_calendar(
         HoyoGame::Genshin,
         q.lang.as_deref(),
         q.refresh.unwrap_or(false),
+        q.force.unwrap_or(false),
     )
     .await?;
     Ok(Json(json!({
@@ -165,6 +166,7 @@ async fn get_genshin_news(
         &kind,
         q.lang.as_deref(),
         q.refresh.unwrap_or(false),
+        q.force.unwrap_or(false),
     )
     .await?;
     Ok(Json(json!({
@@ -319,6 +321,7 @@ async fn post_account_redeem(
 #[derive(Deserialize)]
 struct AutoRedeemQuery {
     refresh: Option<bool>,
+    force: Option<bool>,
 }
 
 async fn post_account_auto_redeem(
@@ -337,6 +340,7 @@ async fn post_account_auto_redeem(
         &payload.nickname,
         user.email.as_deref(),
         q.refresh.unwrap_or(false),
+        q.force.unwrap_or(false),
     )
     .await?;
     Ok(send_success("Hoàn tất tự động nhập giftcode Genshin", summary))

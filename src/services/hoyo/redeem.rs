@@ -137,10 +137,16 @@ fn classify_retcode(retcode: i64, msg: &str) -> RedeemOutcomeKind {
         -2001 | -2004 | -2006 => RedeemOutcomeKind::ExpiredOrInvalid,
         -1071 | -100 | -10001 => RedeemOutcomeKind::CookieExpired,
         -2016 => RedeemOutcomeKind::Cooldown,
-        _ if lower.contains("already in use") || lower.contains("already claimed") || lower.contains("already redeemed") => {
+        _ if lower.contains("already in use")
+            || lower.contains("already claimed")
+            || lower.contains("already redeemed") =>
+        {
             RedeemOutcomeKind::AlreadyClaimed
         }
-        _ if lower.contains("region") || lower.contains("server") || lower.contains("not available in") => {
+        _ if lower.contains("region")
+            || lower.contains("server")
+            || lower.contains("not available in") =>
+        {
             RedeemOutcomeKind::RegionalMismatch
         }
         _ if lower.contains("expired") || lower.contains("invalid") => {
@@ -251,6 +257,7 @@ pub async fn redeem_code(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn auto_redeem_for_account(
     state: &AppState,
     game: HoyoGame,
@@ -261,38 +268,82 @@ pub async fn auto_redeem_for_account(
     nickname: &str,
     notify_email: Option<&str>,
     force_refresh_codes: bool,
+    force_recheck: bool,
 ) -> AppResult<Value> {
+    let server_display = game
+        .normalize_region(server)
+        .map(HoyoGame::server_display_name)
+        .unwrap_or(server);
+
     let active_entries = get_active_code_entries(state, game, force_refresh_codes).await?;
     if active_entries.is_empty() {
         return Ok(json!({
             "ok": true,
             "game": game.slug(),
+            "game_name": game.display_name(),
             "account_id": account_id,
             "uid": uid,
+            "server": server_display,
+            "cookie_expired": false,
             "total_active_codes": 0,
+            "skipped_from_history": 0,
             "redeemed_count": 0,
             "redeemed": [],
+            "previously_redeemed": [],
             "already_claimed": [],
             "regional_skipped": [],
-            "skipped_from_history": 0,
             "expired": [],
             "failed": [],
         }));
     }
 
     let acc_key = format!("{}:{}", game.slug(), account_id);
+
+    let mut redeemed: Vec<Value> = Vec::new();
+    let mut redeemed_code_names: Vec<String> = Vec::new();
+    let mut previously_redeemed: Vec<Value> = Vec::new();
+    let mut already_claimed: Vec<String> = Vec::new();
+    let mut regional_skipped: Vec<String> = Vec::new();
+    let mut expired: Vec<String> = Vec::new();
+    let mut failed: Vec<Value> = Vec::new();
+
+    // Populate arrays directly from history for codes already known (unless force_recheck = true)
     let (candidate_entries, skipped_count) = {
         let guard = state.redeem_history.read().await;
         let claimed_set = guard.accounts.get(&acc_key);
+        let regional_set = guard.regional_skipped.get(&acc_key);
+        let acc_logs = guard.logs.get(&acc_key);
         let mut candidates = Vec::new();
         let mut skipped = 0usize;
 
         for entry in &active_entries {
+            if force_recheck {
+                candidates.push(entry.clone());
+                continue;
+            }
+
             let global_key = format!("{}:{}", game.slug(), entry.code);
-            let already_done = claimed_set.map(|s| s.contains(&entry.code)).unwrap_or(false);
-            let globally_dead = guard.global_expired.contains(&global_key);
-            if already_done || globally_dead {
+            let is_globally_expired = guard.global_expired.contains(&global_key);
+            let is_regional = regional_set.map(|s| s.contains(&entry.code)).unwrap_or(false);
+            let is_claimed = claimed_set.map(|s| s.contains(&entry.code)).unwrap_or(false);
+
+            if is_globally_expired {
                 skipped += 1;
+                expired.push(entry.code.clone());
+            } else if is_regional {
+                skipped += 1;
+                regional_skipped.push(entry.code.clone());
+            } else if is_claimed {
+                skipped += 1;
+                already_claimed.push(entry.code.clone());
+                if let Some(log) = acc_logs.and_then(|logs| logs.iter().find(|l| l.code == entry.code)) {
+                    previously_redeemed.push(json!({
+                        "code": log.code,
+                        "message": log.message,
+                        "rewards": log.rewards,
+                        "redeemed_at": log.redeemed_at,
+                    }));
+                }
             } else {
                 candidates.push(entry.clone());
             }
@@ -304,28 +355,25 @@ pub async fn auto_redeem_for_account(
         return Ok(json!({
             "ok": true,
             "game": game.slug(),
+            "game_name": game.display_name(),
             "account_id": account_id,
             "uid": uid,
+            "server": server_display,
+            "cookie_expired": false,
             "total_active_codes": active_entries.len(),
+            "skipped_from_history": skipped_count,
             "redeemed_count": 0,
             "redeemed": [],
-            "already_claimed": [],
-            "regional_skipped": [],
-            "skipped_from_history": skipped_count,
-            "expired": [],
+            "previously_redeemed": previously_redeemed,
+            "already_claimed": already_claimed,
+            "regional_skipped": regional_skipped,
+            "expired": expired,
             "failed": [],
         }));
     }
 
     let (resolved_uid, region) =
         resolve_uid_and_region(state, game, cookie, server, Some(uid)).await?;
-
-    let mut redeemed: Vec<Value> = Vec::new();
-    let mut redeemed_code_names: Vec<String> = Vec::new();
-    let mut already_claimed: Vec<String> = Vec::new();
-    let mut regional_skipped: Vec<String> = Vec::new();
-    let mut expired: Vec<String> = Vec::new();
-    let mut failed: Vec<Value> = Vec::new();
     let mut cookie_expired = false;
 
     for (idx, entry) in candidate_entries.iter().enumerate() {
@@ -383,10 +431,9 @@ pub async fn auto_redeem_for_account(
                 already_claimed.push(entry.code.clone());
             }
             RedeemOutcomeKind::RegionalMismatch => {
-                // Per seriaati/hoyo-codes notice: regional codes (e.g. ZZZSUSHIRO) only fail for other regions.
-                // Mark skipped ONLY for this account, NOT global_expired.
+                // Regional codes only fail for other regions: track per-account in `regional_skipped`
                 store
-                    .accounts
+                    .regional_skipped
                     .entry(acc_key.clone())
                     .or_default()
                     .insert(entry.code.clone());
@@ -465,6 +512,7 @@ pub async fn auto_redeem_for_account(
         "skipped_from_history": skipped_count,
         "redeemed_count": redeemed.len(),
         "redeemed": redeemed,
+        "previously_redeemed": previously_redeemed,
         "already_claimed": already_claimed,
         "regional_skipped": regional_skipped,
         "expired": expired,
@@ -488,6 +536,15 @@ pub async fn get_account_redeem_history(
             v
         })
         .unwrap_or_default();
+    let regional_codes: Vec<String> = guard
+        .regional_skipped
+        .get(&acc_key)
+        .map(|s| {
+            let mut v: Vec<String> = s.iter().cloned().collect();
+            v.sort();
+            v
+        })
+        .unwrap_or_default();
     let logs = guard.logs.get(&acc_key).cloned().unwrap_or_default();
 
     json!({
@@ -495,6 +552,7 @@ pub async fn get_account_redeem_history(
         "account_id": account_id,
         "total_claimed_codes": claimed_codes.len(),
         "claimed_codes": claimed_codes,
+        "regional_skipped": regional_codes,
         "recent_logs": logs,
     })
 }

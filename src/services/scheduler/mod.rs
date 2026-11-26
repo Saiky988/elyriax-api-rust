@@ -246,6 +246,7 @@ pub async fn run_genshin_auto_redeem(state: AppState) {
             &acc.nickname,
             acc.email.as_deref(),
             should_refresh,
+            false,
         )
         .await
         {

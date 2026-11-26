@@ -163,6 +163,7 @@ pub fn game_router(game: HoyoGame) -> Router<AppState> {
 #[derive(Deserialize)]
 struct RefreshQuery {
     refresh: Option<bool>,
+    force: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -315,6 +316,7 @@ async fn auto_redeem_all_user_games_ep(
     let payloads = get_all_ready_payloads_for_user(&state, user.id).await?;
     let mut results = Vec::with_capacity(payloads.len());
     let force_refresh = q.refresh.unwrap_or(false);
+    let force_recheck = q.force.unwrap_or(false);
 
     for (idx, p) in payloads.into_iter().enumerate() {
         match auto_redeem_for_account(
@@ -327,6 +329,7 @@ async fn auto_redeem_all_user_games_ep(
             &p.nickname,
             user.email.as_deref(),
             force_refresh && idx == 0,
+            force_recheck,
         )
         .await
         {
@@ -408,6 +411,7 @@ async fn handle_game_news(
         &kind,
         q.lang.as_deref(),
         q.refresh.unwrap_or(false),
+        q.force.unwrap_or(false),
     )
     .await?;
     Ok(Json(json!({
@@ -622,6 +626,7 @@ async fn handle_acc_auto_redeem(
         &p.nickname,
         user.email.as_deref(),
         q.refresh.unwrap_or(false),
+        q.force.unwrap_or(false),
     )
     .await?;
     Ok(send_success(

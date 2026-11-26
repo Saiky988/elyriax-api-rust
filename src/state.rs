@@ -52,9 +52,12 @@ pub struct SchedulerState {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RedeemHistoryStore {
-    /// Map of "{game}:{account_id}" -> set of already attempted/claimed/regional-skipped codes
+    /// Map of "{game}:{account_id}" -> set of already redeemed/claimed codes
     #[serde(default)]
     pub accounts: HashMap<String, HashSet<String>>,
+    /// Map of "{game}:{account_id}" -> set of regional-mismatch codes skipped for this account
+    #[serde(default)]
+    pub regional_skipped: HashMap<String, HashSet<String>>,
     /// Codes confirmed globally expired or invalid ("{game}:{code}") so all accounts skip them
     #[serde(default)]
     pub global_expired: HashSet<String>,
