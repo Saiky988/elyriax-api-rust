@@ -257,6 +257,7 @@ pub async fn sync_provider_prices(state: &AppState) -> AppResult<Value> {
         r#"
         SELECT id, product_code, name, variant_name,
                CAST(price AS DOUBLE) AS price,
+               stock, delivery_type,
                provider_name, provider_product_id,
                CAST(COALESCE(provider_markup_percent, 10.00) AS DOUBLE) AS provider_markup_percent
         FROM products
@@ -272,6 +273,7 @@ pub async fn sync_provider_prices(state: &AppState) -> AppResult<Value> {
         return Ok(json!({
             "total_linked": 0,
             "updated": 0,
+            "stock_updated": 0,
             "unchanged": 0,
             "missing": 0,
             "changes": [],
@@ -279,8 +281,8 @@ pub async fn sync_provider_prices(state: &AppState) -> AppResult<Value> {
         }));
     }
 
-    // Collect distinct providers used
-    let mut catalogs: HashMap<String, HashMap<String, f64>> = HashMap::new();
+    // Collect distinct providers used: map provider_product_id -> (base_price, stock_amount)
+    let mut catalogs: HashMap<String, HashMap<String, (f64, i64)>> = HashMap::new();
     let mut errors: Vec<String> = Vec::new();
 
     for r in &rows {
@@ -295,8 +297,10 @@ pub async fn sync_provider_prices(state: &AppState) -> AppResult<Value> {
         match p_name.as_str() {
             "appmmo" => match fetch_appmmo_catalog(state, true).await {
                 Ok(items) => {
-                    let map: HashMap<String, f64> =
-                        items.into_iter().map(|it| (it.id, it.price)).collect();
+                    let map: HashMap<String, (f64, i64)> = items
+                        .into_iter()
+                        .map(|it| (it.id, (it.price, it.amount.max(0))))
+                        .collect();
                     catalogs.insert(p_name, map);
                 }
                 Err(e) => {
@@ -310,6 +314,7 @@ pub async fn sync_provider_prices(state: &AppState) -> AppResult<Value> {
     }
 
     let mut updated = 0usize;
+    let mut stock_updated = 0usize;
     let mut unchanged = 0usize;
     let mut missing = 0usize;
     let mut changes: Vec<Value> = Vec::new();
@@ -320,6 +325,12 @@ pub async fn sync_provider_prices(state: &AppState) -> AppResult<Value> {
         let name: String = r.try_get("name").unwrap_or_default();
         let variant_name: Option<String> = r.try_get("variant_name").ok().flatten();
         let old_price: f64 = r.try_get("price").unwrap_or(0.0);
+        let old_stock: i64 = r.try_get("stock").unwrap_or(0);
+        let delivery_type: String = r
+            .try_get::<Option<String>, _>("delivery_type")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "manual".to_string());
         let p_name = r
             .try_get::<String, _>("provider_name")
             .unwrap_or_default()
@@ -336,7 +347,7 @@ pub async fn sync_provider_prices(state: &AppState) -> AppResult<Value> {
             continue;
         };
 
-        let Some(&base_price) = cat_map.get(&p_pid) else {
+        let Some(&(base_price, provider_stock)) = cat_map.get(&p_pid) else {
             missing += 1;
             continue;
         };
@@ -348,22 +359,31 @@ pub async fn sync_provider_prices(state: &AppState) -> AppResult<Value> {
 
         let new_price = calculate_markup_price(base_price, markup);
         let price_changed = (new_price - old_price).abs() >= 1.0;
+        let is_manual = delivery_type.eq_ignore_ascii_case("manual");
+        let new_stock = if is_manual { provider_stock } else { old_stock };
+        let stock_changed = is_manual && new_stock != old_stock;
 
-        if price_changed {
+        if price_changed || stock_changed {
             sqlx::query(
                 r#"
                 UPDATE products
-                SET price = ?, provider_base_price = ?, provider_last_synced_at = NOW()
+                SET price = ?, stock = ?, provider_base_price = ?, provider_last_synced_at = NOW()
                 WHERE id = ?
                 "#,
             )
             .bind(new_price)
+            .bind(new_stock)
             .bind(base_price)
             .bind(id)
             .execute(pool)
             .await?;
 
-            updated += 1;
+            if price_changed {
+                updated += 1;
+            }
+            if stock_changed {
+                stock_updated += 1;
+            }
             changes.push(json!({
                 "id": id,
                 "product_code": product_code,
@@ -375,6 +395,8 @@ pub async fn sync_provider_prices(state: &AppState) -> AppResult<Value> {
                 "markup_percent": markup,
                 "old_price": old_price,
                 "new_price": new_price,
+                "old_stock": old_stock,
+                "new_stock": new_stock,
             }));
         } else {
             sqlx::query(
@@ -393,8 +415,9 @@ pub async fn sync_provider_prices(state: &AppState) -> AppResult<Value> {
     }
 
     Ok(json!({
-        "total_linked": updated + unchanged + missing,
+        "total_linked": changes.len() + unchanged + missing,
         "updated": updated,
+        "stock_updated": stock_updated,
         "unchanged": unchanged,
         "missing": missing,
         "changes": changes,

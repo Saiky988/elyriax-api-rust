@@ -438,6 +438,7 @@ pub async fn create_product(state: &AppState, data: &Map<String, Value>) -> AppR
     let category = data.get("category").and_then(Value::as_str).unwrap_or("account");
     let description = data.get("description").and_then(Value::as_str);
     let price = data.get("price").and_then(Value::as_f64).unwrap_or(0.0);
+    let stock = data.get("stock").and_then(Value::as_i64).unwrap_or(0).max(0);
     let delivery_type = data
         .get("delivery_type")
         .and_then(Value::as_str)
@@ -468,8 +469,8 @@ pub async fn create_product(state: &AppState, data: &Map<String, Value>) -> AppR
     let res = sqlx::query(
         r#"
         INSERT INTO products
-        (parent_id, product_code, category, name, variant_name, slug, description, price, delivery_type, status, thumbnail, sort_order, provider_name, provider_product_id, provider_markup_percent, provider_base_price)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (parent_id, product_code, category, name, variant_name, slug, description, price, stock, delivery_type, status, thumbnail, sort_order, provider_name, provider_product_id, provider_markup_percent, provider_base_price)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(parent_id)
@@ -480,6 +481,7 @@ pub async fn create_product(state: &AppState, data: &Map<String, Value>) -> AppR
     .bind(&slug)
     .bind(description)
     .bind(price)
+    .bind(stock)
     .bind(delivery_type)
     .bind(status)
     .bind(thumbnail)
@@ -510,7 +512,7 @@ pub async fn update_product(
     let existing = sqlx::query(
         r#"
         SELECT parent_id, product_code, category, name, variant_name, slug, description,
-               CAST(price AS DOUBLE) AS price, delivery_type, status, thumbnail, sort_order,
+               CAST(price AS DOUBLE) AS price, stock, delivery_type, status, thumbnail, sort_order,
                provider_name, provider_product_id,
                CAST(COALESCE(provider_markup_percent, 10.00) AS DOUBLE) AS provider_markup_percent,
                CAST(provider_base_price AS DOUBLE) AS provider_base_price
@@ -567,6 +569,7 @@ pub async fn update_product(
         .get("price")
         .and_then(Value::as_f64)
         .unwrap_or_else(|| row.try_get("price").unwrap_or(0.0));
+    let existing_stock: i64 = row.try_get("stock").unwrap_or(0);
     let delivery_type = data
         .get("delivery_type")
         .and_then(Value::as_str)
@@ -612,12 +615,20 @@ pub async fn update_product(
     } else {
         row.try_get("provider_base_price").ok().flatten()
     };
+    let stock = if delivery_type.eq_ignore_ascii_case("manual") {
+        data.get("stock")
+            .and_then(Value::as_i64)
+            .map(|v| v.max(0))
+            .unwrap_or(existing_stock)
+    } else {
+        existing_stock
+    };
 
     sqlx::query(
         r#"
         UPDATE products
         SET parent_id = ?, product_code = ?, category = ?, name = ?, variant_name = ?,
-            slug = ?, description = ?, price = ?, delivery_type = ?, status = ?, thumbnail = ?, sort_order = ?,
+            slug = ?, description = ?, price = ?, stock = ?, delivery_type = ?, status = ?, thumbnail = ?, sort_order = ?,
             provider_name = ?, provider_product_id = ?, provider_markup_percent = ?, provider_base_price = ?
         WHERE id = ?
         "#,
@@ -630,6 +641,7 @@ pub async fn update_product(
     .bind(slug)
     .bind(description)
     .bind(price)
+    .bind(stock)
     .bind(delivery_type)
     .bind(status)
     .bind(thumbnail)

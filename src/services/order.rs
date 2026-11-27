@@ -145,35 +145,46 @@ pub async fn checkout(state: &AppState, user_id: i64) -> AppResult<Value> {
         let product_id: i64 = item.try_get("product_id")?;
         let product_code: String = item.try_get("product_code")?;
         let unit_price: f64 = item.try_get("price")?;
+        let product_stock: i64 = item.try_get("stock").unwrap_or(0);
         let qty: i64 = item.try_get("quantity")?;
         let delivery_type: String = item.try_get("delivery_type")?;
         let subtotal = unit_price * (qty as f64);
         total_amount += subtotal;
 
-        let available = sqlx::query(
-            r#"
-            SELECT id FROM product_items
-            WHERE product_id = ? AND status = 'available'
-            LIMIT ? FOR UPDATE
-            "#,
-        )
-        .bind(product_id)
-        .bind(qty)
-        .fetch_all(&mut *tx)
-        .await?;
+        let assigned_ids: Vec<i64> = if delivery_type.eq_ignore_ascii_case("manual") {
+            if product_stock < qty {
+                return Err(AppError::bad_request(format!(
+                    "Sản phẩm \"{}\" không đủ số lượng trong kho (còn {})",
+                    product_name, product_stock
+                )));
+            }
+            Vec::new()
+        } else {
+            let available = sqlx::query(
+                r#"
+                SELECT id FROM product_items
+                WHERE product_id = ? AND status = 'available'
+                LIMIT ? FOR UPDATE
+                "#,
+            )
+            .bind(product_id)
+            .bind(qty)
+            .fetch_all(&mut *tx)
+            .await?;
 
-        if (available.len() as i64) < qty {
-            return Err(AppError::bad_request(format!(
-                "Sản phẩm \"{}\" không đủ số lượng trong kho (còn {})",
-                product_name,
-                available.len()
-            )));
-        }
+            if (available.len() as i64) < qty {
+                return Err(AppError::bad_request(format!(
+                    "Sản phẩm \"{}\" không đủ số lượng trong kho (còn {})",
+                    product_name,
+                    available.len()
+                )));
+            }
 
-        let assigned_ids: Vec<i64> = available
-            .into_iter()
-            .filter_map(|r| r.try_get("id").ok())
-            .collect();
+            available
+                .into_iter()
+                .filter_map(|r| r.try_get("id").ok())
+                .collect()
+        };
 
         to_process.push(LockedProductItem {
             product_id,
@@ -218,21 +229,40 @@ pub async fn checkout(state: &AppState, user_id: i64) -> AppResult<Value> {
         .execute(&mut *tx)
         .await?;
 
-    // 5. Create order
+    // 5. Create order (pending for manual approval items, completed immediately for pure automatic)
+    let has_manual = to_process
+        .iter()
+        .any(|p| p.delivery_type.eq_ignore_ascii_case("manual"));
     let order_code = generate_order_code();
-    let order_res = sqlx::query(
-        r#"
-        INSERT INTO orders (order_code, user_id, wallet_id, subtotal, total, currency, status, completed_at)
-        VALUES (?, ?, ?, ?, ?, 'VND', 'completed', CURRENT_TIMESTAMP)
-        "#,
-    )
-    .bind(&order_code)
-    .bind(user_id)
-    .bind(wallet_id)
-    .bind(total_amount)
-    .bind(total_amount)
-    .execute(&mut *tx)
-    .await?;
+    let order_res = if has_manual {
+        sqlx::query(
+            r#"
+            INSERT INTO orders (order_code, user_id, wallet_id, subtotal, total, currency, status, completed_at)
+            VALUES (?, ?, ?, ?, ?, 'VND', 'pending', NULL)
+            "#,
+        )
+        .bind(&order_code)
+        .bind(user_id)
+        .bind(wallet_id)
+        .bind(total_amount)
+        .bind(total_amount)
+        .execute(&mut *tx)
+        .await?
+    } else {
+        sqlx::query(
+            r#"
+            INSERT INTO orders (order_code, user_id, wallet_id, subtotal, total, currency, status, completed_at)
+            VALUES (?, ?, ?, ?, ?, 'VND', 'completed', CURRENT_TIMESTAMP)
+            "#,
+        )
+        .bind(&order_code)
+        .bind(user_id)
+        .bind(wallet_id)
+        .bind(total_amount)
+        .bind(total_amount)
+        .execute(&mut *tx)
+        .await?
+    };
     let order_id = order_res.last_insert_id() as i64;
 
     // 6. Insert order items & mark inventory sold
@@ -265,17 +295,25 @@ pub async fn checkout(state: &AppState, user_id: i64) -> AppResult<Value> {
             .await?;
         }
 
-        sqlx::query(
-            r#"
-            UPDATE products
-            SET stock = (SELECT COUNT(id) FROM product_items WHERE product_id = ? AND status = 'available')
-            WHERE id = ?
-            "#,
-        )
-        .bind(p.product_id)
-        .bind(p.product_id)
-        .execute(&mut *tx)
-        .await?;
+        if p.delivery_type.eq_ignore_ascii_case("manual") {
+            sqlx::query("UPDATE products SET stock = GREATEST(0, stock - ?) WHERE id = ?")
+                .bind(p.quantity)
+                .bind(p.product_id)
+                .execute(&mut *tx)
+                .await?;
+        } else {
+            sqlx::query(
+                r#"
+                UPDATE products
+                SET stock = (SELECT COUNT(id) FROM product_items WHERE product_id = ? AND status = 'available')
+                WHERE id = ?
+                "#,
+            )
+            .bind(p.product_id)
+            .bind(p.product_id)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
 
     // 7. Record transaction

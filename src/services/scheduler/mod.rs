@@ -341,8 +341,8 @@ pub async fn run_provider_price_sync(state: AppState) -> Value {
     let summary = match sync_provider_prices(&state).await {
         Ok(val) => {
             tracing::info!(
-                updated = val.get("updated").and_then(Value::as_u64).unwrap_or(0),
-                unchanged = val.get("unchanged").and_then(Value::as_u64).unwrap_or(0),
+                updated = val.get("updated").and_then(serde_json::Value::as_u64).unwrap_or(0),
+                unchanged = val.get("unchanged").and_then(serde_json::Value::as_u64).unwrap_or(0),
                 "[PROVIDER SYNC] Finished price sync"
             );
             val
