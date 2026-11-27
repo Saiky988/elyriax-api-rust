@@ -103,7 +103,6 @@ async fn main() -> anyhow::Result<()> {
         start_time: Instant::now(),
         system_history: Arc::new(RwLock::new(VecDeque::with_capacity(SYSTEM_HISTORY_LIMIT))),
         metrics_tx,
-        qr_logo_cache: Arc::new(RwLock::new(None)),
         hoyo_codes_cache: Arc::new(DashMap::new()),
         hoyo_calendar_cache: Arc::new(DashMap::new()),
         hoyo_news_cache: Arc::new(DashMap::new()),

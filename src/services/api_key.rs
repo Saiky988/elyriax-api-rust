@@ -1,4 +1,4 @@
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::Row;
 
@@ -18,14 +18,14 @@ pub async fn get_or_create_api_key(state: &AppState, user_id: i64) -> AppResult<
         .await?;
 
     if let Some(row) = existing {
-        let created_at: Option<NaiveDateTime> = row.try_get("created_at").ok();
-        let last_used: Option<NaiveDateTime> = row.try_get("last_used").ok().flatten();
+        let created_at: Option<DateTime<Utc>> = row.try_get("created_at").ok().flatten();
+        let last_used: Option<DateTime<Utc>> = row.try_get("last_used").ok().flatten();
         return Ok(json!({
             "success": true,
             "message": "Bạn đã tạo API Key rồi.",
             "data": {
-                "created_at": created_at.map(|d| d.format("%Y-%m-%dT%H:%M:%S").to_string()),
-                "last_used": last_used.map(|d| d.format("%Y-%m-%dT%H:%M:%S").to_string()),
+                "created_at": created_at,
+                "last_used": last_used,
             }
         }));
     }
@@ -54,11 +54,11 @@ pub async fn get_api_key_info(state: &AppState, user_id: i64) -> AppResult<Optio
         .await?;
 
     Ok(row.map(|r| {
-        let created_at: Option<NaiveDateTime> = r.try_get("created_at").ok();
-        let last_used: Option<NaiveDateTime> = r.try_get("last_used").ok().flatten();
+        let created_at: Option<DateTime<Utc>> = r.try_get("created_at").ok().flatten();
+        let last_used: Option<DateTime<Utc>> = r.try_get("last_used").ok().flatten();
         json!({
-            "created_at": created_at.map(|d| d.format("%Y-%m-%dT%H:%M:%S").to_string()),
-            "last_used": last_used.map(|d| d.format("%Y-%m-%dT%H:%M:%S").to_string()),
+            "created_at": created_at,
+            "last_used": last_used,
         })
     }))
 }

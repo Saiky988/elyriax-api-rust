@@ -1,6 +1,6 @@
 [package]
 name = "elyriax-api"
-version = "3.2.2"
+version = "3.3.0"
 edition = "2021"
 description = "Elyriax High-Performance Backend API written in Rust (Axum + Tokio + SQLx) with full Genshin Impact, HSR & ZZZ Automation"
 authors = ["Nvirya <admin@elyriax.com>"]
@@ -42,9 +42,6 @@ scraper = "0.22"
 regex = "1.11"
 url = "2.5"
 urlencoding = "2.1"
-
-# Image Processing (Dynamic VietQR + Logo Overlay)
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 # Archive (Minecraft Modpack ZIP Builder)
 zip = { version = "2.2", default-features = false, features = ["deflate"] }

@@ -1,4 +1,4 @@
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sqlx::Row;
@@ -36,7 +36,7 @@ pub struct AutoHoyoAccountRow {
     pub uid: String,
     pub server: String,
     pub cookie_encrypted: String,
-    pub last_checkin_at: Option<NaiveDateTime>,
+    pub last_checkin_at: Option<DateTime<Utc>>,
     pub email: Option<String>,
 }
 
@@ -68,10 +68,10 @@ pub async fn ensure_hoyo_accounts_table(state: &AppState) -> AppResult<()> {
             auto_checkin BOOLEAN NOT NULL DEFAULT TRUE,
             auto_redeem BOOLEAN NOT NULL DEFAULT TRUE,
             auto_daily_note BOOLEAN NOT NULL DEFAULT FALSE,
-            last_checkin_at DATETIME NULL,
+            last_checkin_at TIMESTAMP NULL DEFAULT NULL,
             last_checkin_status VARCHAR(32) NULL,
-            last_redeem_at DATETIME NULL,
-            last_daily_note_at DATETIME NULL,
+            last_redeem_at TIMESTAMP NULL DEFAULT NULL,
+            last_daily_note_at TIMESTAMP NULL DEFAULT NULL,
             status VARCHAR(32) NOT NULL DEFAULT 'active',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -630,9 +630,9 @@ pub async fn get_account_by_id(
         return Err(AppError::not_found("Tài khoản không tồn tại hoặc đã bị xóa."));
     };
 
-    let last_checkin: Option<NaiveDateTime> = r.try_get("last_checkin_at").ok().flatten();
-    let last_redeem: Option<NaiveDateTime> = r.try_get("last_redeem_at").ok().flatten();
-    let last_note: Option<NaiveDateTime> = r.try_get("last_daily_note_at").ok().flatten();
+    let last_checkin: Option<DateTime<Utc>> = r.try_get("last_checkin_at").ok().flatten();
+    let last_redeem: Option<DateTime<Utc>> = r.try_get("last_redeem_at").ok().flatten();
+    let last_note: Option<DateTime<Utc>> = r.try_get("last_daily_note_at").ok().flatten();
 
     Ok(json!({
         "id": r.try_get::<i64, _>("id")?,
@@ -644,9 +644,9 @@ pub async fn get_account_by_id(
         "auto_checkin": r.try_get::<bool, _>("auto_checkin").unwrap_or(false),
         "auto_redeem": r.try_get::<bool, _>("auto_redeem").unwrap_or(false),
         "auto_daily_note": r.try_get::<bool, _>("auto_daily_note").unwrap_or(false),
-        "last_checkin_at": last_checkin.map(|d| d.format("%Y-%m-%dT%H:%M:%S").to_string()),
-        "last_redeem_at": last_redeem.map(|d| d.format("%Y-%m-%dT%H:%M:%S").to_string()),
-        "last_daily_note_at": last_note.map(|d| d.format("%Y-%m-%dT%H:%M:%S").to_string()),
+        "last_checkin_at": last_checkin,
+        "last_redeem_at": last_redeem,
+        "last_daily_note_at": last_note,
         "status": r.try_get::<String, _>("status")?,
     }))
 }

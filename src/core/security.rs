@@ -1,6 +1,6 @@
 use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use rand::{distributions::Alphanumeric, Rng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -120,8 +120,13 @@ pub fn decode_jwt_token(token: &str, secret: &str) -> AppResult<JwtUserClaims> {
     Ok(data.claims)
 }
 
-pub fn create_qr_token(amount: f64, content: String, secret: &str) -> AppResult<String> {
-    let exp = (Utc::now() + Duration::hours(2)).timestamp() as usize;
+pub fn create_qr_token(
+    amount: f64,
+    content: String,
+    secret: &str,
+    expired_at: DateTime<Utc>,
+) -> AppResult<String> {
+    let exp = expired_at.timestamp().max(0) as usize;
     let claims = QrTokenClaims {
         amount,
         content,

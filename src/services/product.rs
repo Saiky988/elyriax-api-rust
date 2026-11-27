@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Utc};
 use serde_json::{json, Map, Value};
 use sqlx::{MySql, Row, Transaction};
 
@@ -449,16 +449,16 @@ pub async fn get_admin_product_items(
     let items: Vec<Value> = rows
         .into_iter()
         .map(|r| {
-            let created_at: Option<NaiveDateTime> = r.try_get("created_at").ok().flatten();
-            let sold_at: Option<NaiveDateTime> = r.try_get("sold_at").ok().flatten();
+            let created_at: Option<DateTime<Utc>> = r.try_get("created_at").ok().flatten();
+            let sold_at: Option<DateTime<Utc>> = r.try_get("sold_at").ok().flatten();
             json!({
                 "id": r.try_get::<i64, _>("id").unwrap_or(0),
                 "identifier": r.try_get::<Option<String>, _>("identifier").ok().flatten(),
                 "content": r.try_get::<Option<String>, _>("content").ok().flatten(),
                 "status": r.try_get::<Option<String>, _>("status").ok().flatten(),
                 "order_id": r.try_get::<Option<i64>, _>("order_id").ok().flatten(),
-                "created_at": created_at.map(|d| d.format("%Y-%m-%dT%H:%M:%S").to_string()),
-                "sold_at": sold_at.map(|d| d.format("%Y-%m-%dT%H:%M:%S").to_string()),
+                "created_at": created_at,
+                "sold_at": sold_at,
             })
         })
         .collect();

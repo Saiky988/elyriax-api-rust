@@ -88,7 +88,6 @@ pub struct AppState {
     pub metrics_tx: broadcast::Sender<Value>,
 
     // In-memory TTL caches
-    pub qr_logo_cache: Arc<RwLock<Option<Vec<u8>>>>,
     pub hoyo_codes_cache: Arc<DashMap<String, CachedValue<Value>>>,
     pub hoyo_calendar_cache: Arc<DashMap<String, CachedValue<Value>>>,
     pub hoyo_news_cache: Arc<DashMap<String, CachedValue<Value>>>,

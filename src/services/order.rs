@@ -1,4 +1,4 @@
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::Row;
 
@@ -89,8 +89,8 @@ pub async fn get_order_by_id(state: &AppState, user_id: i64, order_id: i64) -> A
         })
         .collect();
 
-    let created_at: Option<NaiveDateTime> = order.try_get("created_at").ok().flatten();
-    let completed_at: Option<NaiveDateTime> = order.try_get("completed_at").ok().flatten();
+    let created_at: Option<DateTime<Utc>> = order.try_get("created_at").ok().flatten();
+    let completed_at: Option<DateTime<Utc>> = order.try_get("completed_at").ok().flatten();
 
     Ok(json!({
         "id": order.try_get::<i64, _>("id")?,
@@ -99,8 +99,8 @@ pub async fn get_order_by_id(state: &AppState, user_id: i64, order_id: i64) -> A
         "total": order.try_get::<f64, _>("total").unwrap_or(0.0),
         "currency": order.try_get::<String, _>("currency").unwrap_or_else(|_| "VND".to_string()),
         "status": order.try_get::<String, _>("status")?,
-        "created_at": created_at.map(|d| d.format("%Y-%m-%dT%H:%M:%S").to_string()),
-        "completed_at": completed_at.map(|d| d.format("%Y-%m-%dT%H:%M:%S").to_string()),
+        "created_at": created_at,
+        "completed_at": completed_at,
         "items": formatted_items,
     }))
 }
@@ -351,8 +351,8 @@ pub async fn get_orders(
     let items: Vec<Value> = rows
         .into_iter()
         .map(|r| {
-            let created_at: Option<NaiveDateTime> = r.try_get("created_at").ok().flatten();
-            let completed_at: Option<NaiveDateTime> = r.try_get("completed_at").ok().flatten();
+            let created_at: Option<DateTime<Utc>> = r.try_get("created_at").ok().flatten();
+            let completed_at: Option<DateTime<Utc>> = r.try_get("completed_at").ok().flatten();
             json!({
                 "id": r.try_get::<i64, _>("id").unwrap_or(0),
                 "order_code": r.try_get::<String, _>("order_code").unwrap_or_default(),
@@ -360,8 +360,8 @@ pub async fn get_orders(
                 "total": r.try_get::<f64, _>("total").unwrap_or(0.0),
                 "currency": r.try_get::<String, _>("currency").unwrap_or_else(|_| "VND".to_string()),
                 "status": r.try_get::<String, _>("status").unwrap_or_default(),
-                "created_at": created_at.map(|d| d.format("%Y-%m-%dT%H:%M:%S").to_string()),
-                "completed_at": completed_at.map(|d| d.format("%Y-%m-%dT%H:%M:%S").to_string()),
+                "created_at": created_at,
+                "completed_at": completed_at,
             })
         })
         .collect();

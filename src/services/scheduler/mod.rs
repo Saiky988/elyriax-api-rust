@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use chrono::{FixedOffset, NaiveDate, NaiveDateTime, Timelike, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, Timelike, Utc};
 use serde_json::{json, Value};
 
 use crate::{
@@ -28,12 +28,13 @@ fn now_vn() -> chrono::DateTime<FixedOffset> {
     Utc::now().with_timezone(&tz_vn)
 }
 
-fn already_processed_today(last_checkin_at: Option<NaiveDateTime>) -> bool {
+fn already_processed_today(last_checkin_at: Option<DateTime<Utc>>) -> bool {
     let Some(dt) = last_checkin_at else {
         return false;
     };
+    let tz_vn = FixedOffset::east_opt(7 * 3600).expect("valid UTC+7 offset");
     let today_vn = now_vn().date_naive();
-    dt.date() == today_vn
+    dt.with_timezone(&tz_vn).date_naive() == today_vn
 }
 
 /// Runs daily check-in across ALL 3 games: Genshin Impact, Honkai: Star Rail, and Zenless Zone Zero.

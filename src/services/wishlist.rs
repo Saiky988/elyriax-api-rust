@@ -1,4 +1,4 @@
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::Row;
 
@@ -35,7 +35,7 @@ pub async fn get_wishlist(state: &AppState, user_id: i64) -> AppResult<Vec<Value
     Ok(rows
         .into_iter()
         .map(|r| {
-            let created_at: Option<NaiveDateTime> = r.try_get("created_at").ok().flatten();
+            let created_at: Option<DateTime<Utc>> = r.try_get("created_at").ok().flatten();
             json!({
                 "wishlist_id": r.try_get::<i64, _>("wishlist_id").unwrap_or(0),
                 "product_code": r.try_get::<String, _>("product_code").unwrap_or_default(),
@@ -46,7 +46,7 @@ pub async fn get_wishlist(state: &AppState, user_id: i64) -> AppResult<Vec<Value
                 "delivery_type": r.try_get::<Option<String>, _>("delivery_type").ok().flatten(),
                 "status": r.try_get::<Option<String>, _>("status").ok().flatten(),
                 "thumbnail": r.try_get::<Option<String>, _>("thumbnail").ok().flatten(),
-                "created_at": created_at.map(|d| d.format("%Y-%m-%dT%H:%M:%S").to_string()),
+                "created_at": created_at,
             })
         })
         .collect())
