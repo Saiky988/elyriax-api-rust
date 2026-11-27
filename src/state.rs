@@ -44,10 +44,13 @@ pub struct SchedulerState {
     pub checkin_running: AtomicBool,
     pub redeem_running: AtomicBool,
     pub daily_note_running: AtomicBool,
+    pub provider_sync_running: AtomicBool,
     pub last_checkin_run: RwLock<Option<String>>,
     pub last_redeem_run: RwLock<Option<String>>,
     pub last_daily_note_run: RwLock<Option<String>>,
     pub last_redeem_summary: RwLock<Option<Value>>,
+    pub last_provider_sync_run: RwLock<Option<String>>,
+    pub last_provider_sync_summary: RwLock<Option<Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -92,6 +95,7 @@ pub struct AppState {
     pub hoyo_calendar_cache: Arc<DashMap<String, CachedValue<Value>>>,
     pub hoyo_news_cache: Arc<DashMap<String, CachedValue<Value>>>,
     pub evn_units_cache: Arc<DashMap<String, CachedValue<Value>>>,
+    pub provider_catalog_cache: Arc<DashMap<String, CachedValue<Value>>>,
 
     // Local JSON-backed stores protected by async RwLock
     pub go_links_lock: Arc<RwLock<()>>,

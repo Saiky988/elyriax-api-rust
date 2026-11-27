@@ -20,7 +20,8 @@ use crate::{
             create_product, delete_product, delete_product_item, get_admin_product_items,
             get_admin_products, import_product_items, update_product, update_product_item,
         },
-        scheduler::get_scheduler_status,
+        provider::{get_provider_catalog_filtered, list_providers},
+        scheduler::{get_scheduler_status, run_provider_price_sync},
     },
     state::AppState,
 };
@@ -52,6 +53,10 @@ pub fn router() -> Router<AppState> {
         // Orders
         .route("/orders", get(list_admin_orders_ep))
         .route("/orders/{order_id}", patch(update_admin_order_ep))
+        // Providers (AppMMO price-sync)
+        .route("/providers", get(list_providers_ep))
+        .route("/providers/{provider}/catalog", get(provider_catalog_ep))
+        .route("/providers/sync", post(sync_providers_ep))
 }
 
 /* ========================= OVERVIEW ========================= */
@@ -798,4 +803,46 @@ async fn update_admin_order_ep(
     }
 
     Ok(send_success_empty("Cập nhật trạng thái đơn hàng thành công"))
+}
+
+/* ========================= PROVIDERS ========================= */
+
+async fn list_providers_ep(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+) -> AppResult<Json<Value>> {
+    let data = list_providers(&state).await?;
+    Ok(send_success("Lấy danh sách nhà cung cấp thành công", data))
+}
+
+#[derive(Deserialize)]
+struct ProviderCatalogQuery {
+    q: Option<String>,
+    limit: Option<usize>,
+    refresh: Option<bool>,
+}
+
+async fn provider_catalog_ep(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Path(provider): Path<String>,
+    Query(q): Query<ProviderCatalogQuery>,
+) -> AppResult<Json<Value>> {
+    let data = get_provider_catalog_filtered(
+        &state,
+        &provider,
+        q.q.as_deref(),
+        q.limit.unwrap_or(60),
+        q.refresh.unwrap_or(false),
+    )
+    .await?;
+    Ok(send_success("Lấy danh mục sản phẩm nhà cung cấp thành công", data))
+}
+
+async fn sync_providers_ep(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+) -> AppResult<Json<Value>> {
+    let summary = run_provider_price_sync(state).await;
+    Ok(send_success("Hoàn tất đồng bộ giá từ nhà cung cấp", summary))
 }

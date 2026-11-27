@@ -19,6 +19,7 @@ use crate::{
             redeem::auto_redeem_for_account,
             HoyoGame,
         },
+        provider::sync_provider_prices,
     },
     state::AppState,
 };
@@ -325,16 +326,57 @@ pub async fn run_genshin_auto_daily_note(state: AppState) {
         .store(false, Ordering::SeqCst);
 }
 
+/// Runs automatic provider price sync (e.g., Shop AppMMO -> price + 5-10% markup).
+pub async fn run_provider_price_sync(state: AppState) -> Value {
+    if state
+        .scheduler
+        .provider_sync_running
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return json!({ "skipped": true, "message": "Provider price sync is already running" });
+    }
+
+    tracing::info!("[PROVIDER SYNC] Starting scheduled product price sync...");
+    let summary = match sync_provider_prices(&state).await {
+        Ok(val) => {
+            tracing::info!(
+                updated = val.get("updated").and_then(Value::as_u64).unwrap_or(0),
+                unchanged = val.get("unchanged").and_then(Value::as_u64).unwrap_or(0),
+                "[PROVIDER SYNC] Finished price sync"
+            );
+            val
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "[PROVIDER SYNC] Price sync failed");
+            json!({ "error": err.to_string(), "updated": 0 })
+        }
+    };
+
+    let now_str = now_vn().to_rfc3339();
+    *state.scheduler.last_provider_sync_run.write().await = Some(now_str);
+    *state.scheduler.last_provider_sync_summary.write().await = Some(summary.clone());
+    state
+        .scheduler
+        .provider_sync_running
+        .store(false, Ordering::SeqCst);
+    summary
+}
+
 pub async fn get_scheduler_status(state: &AppState) -> Value {
     json!({
         "games": ["genshin", "hsr", "zzz"],
         "checkin_running": state.scheduler.checkin_running.load(Ordering::SeqCst),
         "redeem_running": state.scheduler.redeem_running.load(Ordering::SeqCst),
         "daily_note_running": state.scheduler.daily_note_running.load(Ordering::SeqCst),
+        "provider_sync_running": state.scheduler.provider_sync_running.load(Ordering::SeqCst),
+        "provider_sync_interval_hours": state.config.provider_sync_interval_hours,
         "last_checkin_run": *state.scheduler.last_checkin_run.read().await,
         "last_redeem_run": *state.scheduler.last_redeem_run.read().await,
         "last_redeem_summary": *state.scheduler.last_redeem_summary.read().await,
         "last_daily_note_run": *state.scheduler.last_daily_note_run.read().await,
+        "last_provider_sync_run": *state.scheduler.last_provider_sync_run.read().await,
+        "last_provider_sync_summary": *state.scheduler.last_provider_sync_summary.read().await,
         "server_time_vn": now_vn().to_rfc3339(),
     })
 }
@@ -345,6 +387,7 @@ pub fn spawn_scheduler(state: AppState) {
         let mut last_checkin_slot: Option<(NaiveDate, u32)> = None;
         let mut last_redeem_slot: Option<(NaiveDate, u32)> = None;
         let mut last_note_slot: Option<(NaiveDate, u32, u32)> = None;
+        let mut last_provider_slot: Option<(NaiveDate, u32)> = None;
 
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         loop {
@@ -383,6 +426,22 @@ pub fn spawn_scheduler(state: AppState) {
                     last_note_slot = Some(slot);
                     let st = state.clone();
                     tokio::spawn(async move { run_genshin_auto_daily_note(st).await });
+                }
+            }
+
+            // 4. Provider Price Sync every 12h (default 00:05 and 12:05 VN)
+            let sync_every = (state.config.provider_sync_interval_hours as u32).clamp(1, 24);
+            if !state.config.provider_appmmo_api_key.trim().is_empty()
+                && hour % sync_every == 0
+                && minute == 5
+            {
+                let slot = (day, hour);
+                if last_provider_slot != Some(slot) {
+                    last_provider_slot = Some(slot);
+                    let st = state.clone();
+                    tokio::spawn(async move {
+                        let _ = run_provider_price_sync(st).await;
+                    });
                 }
             }
         }

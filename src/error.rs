@@ -36,6 +36,9 @@ pub enum AppError {
     Serde(#[from] serde_json::Error),
 
     #[error("{0}")]
+    BadGateway(String),
+
+    #[error("{0}")]
     Internal(String),
 }
 
@@ -54,6 +57,10 @@ impl AppError {
 
     pub fn not_found(msg: impl Into<String>) -> Self {
         Self::NotFound(msg.into())
+    }
+
+    pub fn bad_gateway(msg: impl Into<String>) -> Self {
+        Self::BadGateway(msg.into())
     }
 
     pub fn internal(msg: impl Into<String>) -> Self {
@@ -89,6 +96,10 @@ impl IntoResponse for AppError {
             AppError::Serde(e) => {
                 tracing::error!(error = %e, "JSON error");
                 (StatusCode::BAD_REQUEST, "Dữ liệu JSON không hợp lệ".to_string())
+            }
+            AppError::BadGateway(msg) => {
+                tracing::warn!(error = %msg, "Upstream provider error");
+                (StatusCode::BAD_GATEWAY, msg.clone())
             }
             AppError::Internal(msg) => {
                 tracing::error!(error = %msg, "Internal server error");

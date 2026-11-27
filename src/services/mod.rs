@@ -7,6 +7,7 @@ pub mod go;
 pub mod hoyo;
 pub mod order;
 pub mod product;
+pub mod provider;
 pub mod scheduler;
 pub mod session;
 pub mod settings;

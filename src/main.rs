@@ -107,6 +107,7 @@ async fn main() -> anyhow::Result<()> {
         hoyo_calendar_cache: Arc::new(DashMap::new()),
         hoyo_news_cache: Arc::new(DashMap::new()),
         evn_units_cache: Arc::new(DashMap::new()),
+        provider_catalog_cache: Arc::new(DashMap::new()),
         go_links_lock: Arc::new(RwLock::new(())),
         file_db_lock: Arc::new(RwLock::new(())),
         redeem_history: Arc::new(RwLock::new(RedeemHistoryStore::default())),

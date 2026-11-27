@@ -9,7 +9,7 @@ use crate::{
     core::{auth::AdminUser, response::send_success},
     services::scheduler::{
         get_scheduler_status, run_genshin_auto_checkin, run_genshin_auto_daily_note,
-        run_genshin_auto_redeem,
+        run_genshin_auto_redeem, run_provider_price_sync,
     },
     state::AppState,
 };
@@ -20,6 +20,7 @@ pub fn router() -> Router<AppState> {
         .route("/test-checkin", post(test_checkin_ep))
         .route("/test-redeem", post(test_redeem_ep))
         .route("/test-daily-note", post(test_daily_note_ep))
+        .route("/test-provider-sync", post(test_provider_sync_ep))
 }
 
 async fn scheduler_status_ep(State(state): State<AppState>, _admin: AdminUser) -> Json<Value> {
@@ -49,4 +50,12 @@ async fn test_daily_note_ep(State(state): State<AppState>, _admin: AdminUser) ->
         run_genshin_auto_daily_note(st).await;
     });
     Json(json!({ "success": true, "message": "testing daily-note" }))
+}
+
+async fn test_provider_sync_ep(State(state): State<AppState>, _admin: AdminUser) -> Json<Value> {
+    let st = state.clone();
+    tokio::spawn(async move {
+        let _ = run_provider_price_sync(st).await;
+    });
+    Json(json!({ "success": true, "message": "testing provider price sync" }))
 }

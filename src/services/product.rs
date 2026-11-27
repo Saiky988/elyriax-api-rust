@@ -333,7 +333,11 @@ pub async fn get_admin_products(
     let mut sql = String::from(
         r#"
         SELECT id, parent_id, product_code, category, name, variant_name, slug, description,
-               CAST(price AS DOUBLE) AS price, stock, delivery_type, status, thumbnail, sort_order, created_at
+               CAST(price AS DOUBLE) AS price, stock, delivery_type, status, thumbnail, sort_order,
+               provider_name, provider_product_id,
+               CAST(COALESCE(provider_markup_percent, 10.00) AS DOUBLE) AS provider_markup_percent,
+               CAST(provider_base_price AS DOUBLE) AS provider_base_price,
+               provider_last_synced_at, created_at
         FROM products WHERE 1=1
         "#,
     );
@@ -378,6 +382,7 @@ pub async fn get_admin_products(
         .into_iter()
         .map(|r| {
             let created_at: Option<DateTime<Utc>> = r.try_get("created_at").ok().flatten();
+            let provider_last_synced_at: Option<DateTime<Utc>> = r.try_get("provider_last_synced_at").ok().flatten();
             json!({
                 "id": r.try_get::<i64, _>("id").unwrap_or(0),
                 "parent_id": r.try_get::<Option<i64>, _>("parent_id").ok().flatten(),
@@ -393,6 +398,11 @@ pub async fn get_admin_products(
                 "status": r.try_get::<String, _>("status").unwrap_or_default(),
                 "thumbnail": r.try_get::<Option<String>, _>("thumbnail").ok().flatten(),
                 "sort_order": r.try_get::<i64, _>("sort_order").unwrap_or(0),
+                "provider_name": r.try_get::<Option<String>, _>("provider_name").ok().flatten(),
+                "provider_product_id": r.try_get::<Option<String>, _>("provider_product_id").ok().flatten(),
+                "provider_markup_percent": r.try_get::<f64, _>("provider_markup_percent").unwrap_or(10.0),
+                "provider_base_price": r.try_get::<Option<f64>, _>("provider_base_price").ok().flatten(),
+                "provider_last_synced_at": provider_last_synced_at,
                 "created_at": created_at,
             })
         })
@@ -438,12 +448,28 @@ pub async fn create_product(state: &AppState, data: &Map<String, Value>) -> AppR
         .unwrap_or("active");
     let thumbnail = data.get("thumbnail").and_then(Value::as_str);
     let sort_order = data.get("sort_order").and_then(Value::as_i64).unwrap_or(0);
+    let provider_name = data
+        .get("provider_name")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty());
+    let provider_product_id = data
+        .get("provider_product_id")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let provider_markup_percent = data
+        .get("provider_markup_percent")
+        .and_then(Value::as_f64)
+        .unwrap_or(10.0)
+        .clamp(0.0, 500.0);
+    let provider_base_price = data.get("provider_base_price").and_then(Value::as_f64);
 
     let res = sqlx::query(
         r#"
         INSERT INTO products
-        (parent_id, product_code, category, name, variant_name, slug, description, price, delivery_type, status, thumbnail, sort_order)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (parent_id, product_code, category, name, variant_name, slug, description, price, delivery_type, status, thumbnail, sort_order, provider_name, provider_product_id, provider_markup_percent, provider_base_price)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(parent_id)
@@ -458,6 +484,10 @@ pub async fn create_product(state: &AppState, data: &Map<String, Value>) -> AppR
     .bind(status)
     .bind(thumbnail)
     .bind(sort_order)
+    .bind(provider_name)
+    .bind(provider_product_id)
+    .bind(provider_markup_percent)
+    .bind(provider_base_price)
     .execute(pool)
     .await
     .map_err(|e| {
@@ -480,7 +510,10 @@ pub async fn update_product(
     let existing = sqlx::query(
         r#"
         SELECT parent_id, product_code, category, name, variant_name, slug, description,
-               CAST(price AS DOUBLE) AS price, delivery_type, status, thumbnail, sort_order
+               CAST(price AS DOUBLE) AS price, delivery_type, status, thumbnail, sort_order,
+               provider_name, provider_product_id,
+               CAST(COALESCE(provider_markup_percent, 10.00) AS DOUBLE) AS provider_markup_percent,
+               CAST(provider_base_price AS DOUBLE) AS provider_base_price
         FROM products WHERE id = ?
         "#,
     )
@@ -553,12 +586,39 @@ pub async fn update_product(
         .get("sort_order")
         .and_then(Value::as_i64)
         .unwrap_or_else(|| row.try_get("sort_order").unwrap_or(0));
+    let provider_name = if data.contains_key("provider_name") {
+        data.get("provider_name")
+            .and_then(Value::as_str)
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+    } else {
+        row.try_get("provider_name").ok().flatten()
+    };
+    let provider_product_id = if data.contains_key("provider_product_id") {
+        data.get("provider_product_id")
+            .and_then(Value::as_str)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    } else {
+        row.try_get("provider_product_id").ok().flatten()
+    };
+    let provider_markup_percent = data
+        .get("provider_markup_percent")
+        .and_then(Value::as_f64)
+        .unwrap_or_else(|| row.try_get("provider_markup_percent").unwrap_or(10.0))
+        .clamp(0.0, 500.0);
+    let provider_base_price = if data.contains_key("provider_base_price") {
+        data.get("provider_base_price").and_then(Value::as_f64)
+    } else {
+        row.try_get("provider_base_price").ok().flatten()
+    };
 
     sqlx::query(
         r#"
         UPDATE products
         SET parent_id = ?, product_code = ?, category = ?, name = ?, variant_name = ?,
-            slug = ?, description = ?, price = ?, delivery_type = ?, status = ?, thumbnail = ?, sort_order = ?
+            slug = ?, description = ?, price = ?, delivery_type = ?, status = ?, thumbnail = ?, sort_order = ?,
+            provider_name = ?, provider_product_id = ?, provider_markup_percent = ?, provider_base_price = ?
         WHERE id = ?
         "#,
     )
@@ -574,6 +634,10 @@ pub async fn update_product(
     .bind(status)
     .bind(thumbnail)
     .bind(sort_order)
+    .bind(provider_name)
+    .bind(provider_product_id)
+    .bind(provider_markup_percent)
+    .bind(provider_base_price)
     .bind(prod_id)
     .execute(pool)
     .await?;

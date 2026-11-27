@@ -47,6 +47,11 @@ pub struct Config {
     // Email (Resend)
     pub resend_api_key: String,
     pub email_from: String,
+
+    // Product Providers (AppMMO auto price-sync)
+    pub provider_appmmo_url: String,
+    pub provider_appmmo_api_key: String,
+    pub provider_sync_interval_hours: u64,
 }
 
 impl Config {
@@ -121,6 +126,15 @@ impl Config {
             resend_api_key: env::var("RESEND_API_KEY").unwrap_or_default(),
             email_from: env::var("EMAIL_FROM")
                 .unwrap_or_else(|_| "Elyriax <no-reply@elyriax.com>".to_string()),
+
+            provider_appmmo_url: env::var("PROVIDER_APPMMO_URL")
+                .unwrap_or_else(|_| "https://shop.appmmo.com/api/products.php".to_string()),
+            provider_appmmo_api_key: env::var("PROVIDER_APPMMO_API_KEY").unwrap_or_default(),
+            provider_sync_interval_hours: env::var("PROVIDER_SYNC_INTERVAL_HOURS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(12)
+                .clamp(1, 24),
         }
     }
 
