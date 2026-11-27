@@ -38,7 +38,8 @@ pub struct Config {
     pub bank_account_no: String,
     pub bank_account_name: String,
 
-    // Admin
+    // Admin (Email-based via `ADMIN=saikomusic09@gmail.com` + optional legacy fallbacks)
+    pub admin_emails: Vec<String>,
     pub admin_username: String,
     pub admin_password: String,
     pub admin_token: String,
@@ -54,13 +55,20 @@ impl Config {
 
         let base_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
+        let admin_emails: Vec<String> = env::var("ADMIN")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+
         let admin_username = env::var("ADMIN_USERNAME")
             .or_else(|_| env::var("ADMIN_USER"))
-            .unwrap_or_else(|_| "elyriax".to_string());
+            .unwrap_or_default();
 
         let admin_password = env::var("ADMIN_PASSWORD")
             .or_else(|_| env::var("ADMIN_PASS"))
-            .unwrap_or_else(|_| "change_me_admin_password".to_string());
+            .unwrap_or_default();
 
         Self {
             host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
@@ -105,6 +113,7 @@ impl Config {
             bank_account_no: env::var("BANK_ACCOUNT_NO").unwrap_or_default(),
             bank_account_name: env::var("BANK_ACCOUNT_NAME").unwrap_or_default(),
 
+            admin_emails,
             admin_username,
             admin_password,
             admin_token: env::var("ADMIN_TOKEN").unwrap_or_default(),
@@ -113,6 +122,14 @@ impl Config {
             email_from: env::var("EMAIL_FROM")
                 .unwrap_or_else(|_| "Elyriax <no-reply@elyriax.com>".to_string()),
         }
+    }
+
+    pub fn is_admin_email(&self, email: Option<&str>) -> bool {
+        let Some(e) = email else {
+            return false;
+        };
+        let normalized = e.trim().to_lowercase();
+        !normalized.is_empty() && self.admin_emails.iter().any(|a| a == &normalized)
     }
 
     pub fn data_dir(&self) -> PathBuf {

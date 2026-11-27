@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sqlx::{MySql, Row, Transaction};
 
@@ -8,6 +9,23 @@ use crate::{
     error::{AppError, AppResult},
     state::AppState,
 };
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProductVariant {
+    pub id: i64,
+    pub parent_id: Option<i64>,
+    pub product_code: String,
+    pub category: Option<String>,
+    pub name: String,
+    pub variant_name: Option<String>,
+    pub slug: Option<String>,
+    pub description: Option<String>,
+    pub price: f64,
+    pub stock: i64,
+    pub delivery_type: Option<String>,
+    pub thumbnail: Option<String>,
+    pub sort_order: i64,
+}
 
 pub async fn sync_stock_tx(tx: &mut Transaction<'_, MySql>, product_id: i64) -> AppResult<()> {
     sqlx::query(
@@ -22,6 +40,25 @@ pub async fn sync_stock_tx(tx: &mut Transaction<'_, MySql>, product_id: i64) -> 
     .execute(&mut **tx)
     .await?;
     Ok(())
+}
+
+pub async fn get_public_categories(state: &AppState) -> AppResult<Vec<String>> {
+    let pool = state.db()?;
+    let rows = sqlx::query(
+        r#"
+        SELECT DISTINCT category
+        FROM products
+        WHERE status = 'active' AND parent_id IS NULL AND category IS NOT NULL AND category <> ''
+        ORDER BY category ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| r.try_get::<String, _>("category").ok())
+        .collect())
 }
 
 pub async fn get_public_products(
@@ -43,19 +80,58 @@ pub async fn get_public_products(
     };
 
     let mut sql = String::from(
-        "SELECT product_code, category, name, slug, description, CAST(price AS DOUBLE) AS price, stock, delivery_type, thumbnail FROM products WHERE status = 'active'",
+        r#"
+        SELECT
+            p.id,
+            p.product_code,
+            p.category,
+            p.name,
+            p.variant_name,
+            p.slug,
+            p.description,
+            CAST(p.price AS DOUBLE) AS price,
+            p.stock,
+            p.delivery_type,
+            p.thumbnail,
+            COALESCE(v.variants_count, 0) AS variants_count,
+            CAST(COALESCE(v.min_price, p.price) AS DOUBLE) AS min_price,
+            CAST(COALESCE(v.max_price, p.price) AS DOUBLE) AS max_price,
+            CAST(CASE WHEN COALESCE(v.variants_count, 0) > 0 THEN COALESCE(v.total_stock, 0) ELSE p.stock END AS SIGNED) AS total_stock
+        FROM products p
+        LEFT JOIN (
+            SELECT
+                parent_id,
+                COUNT(id) AS variants_count,
+                MIN(price) AS min_price,
+                MAX(price) AS max_price,
+                SUM(stock) AS total_stock
+            FROM products
+            WHERE status = 'active' AND parent_id IS NOT NULL
+            GROUP BY parent_id
+        ) v ON v.parent_id = p.id
+        WHERE p.status = 'active' AND p.parent_id IS NULL
+        "#,
     );
-    let mut count_sql = String::from("SELECT COUNT(id) AS total FROM products WHERE status = 'active'");
+    let mut count_sql = String::from(
+        "SELECT COUNT(p.id) AS total FROM products p WHERE p.status = 'active' AND p.parent_id IS NULL",
+    );
 
     if category.is_some() {
-        sql.push_str(" AND category = ?");
-        count_sql.push_str(" AND category = ?");
+        sql.push_str(" AND p.category = ?");
+        count_sql.push_str(" AND p.category = ?");
     }
     if search.is_some() {
-        sql.push_str(" AND name LIKE ?");
-        count_sql.push_str(" AND name LIKE ?");
+        sql.push_str(
+            " AND (p.name LIKE ? OR p.product_code LIKE ? OR EXISTS (SELECT 1 FROM products c WHERE c.parent_id = p.id AND c.status = 'active' AND (c.name LIKE ? OR c.variant_name LIKE ? OR c.product_code LIKE ?)))",
+        );
+        count_sql.push_str(
+            " AND (p.name LIKE ? OR p.product_code LIKE ? OR EXISTS (SELECT 1 FROM products c WHERE c.parent_id = p.id AND c.status = 'active' AND (c.name LIKE ? OR c.variant_name LIKE ? OR c.product_code LIKE ?)))",
+        );
     }
-    sql.push_str(&format!(" ORDER BY sort_order ASC, created_at {} LIMIT ? OFFSET ?", sort_dir));
+    sql.push_str(&format!(
+        " ORDER BY p.sort_order ASC, p.created_at {} LIMIT ? OFFSET ?",
+        sort_dir
+    ));
 
     let mut q = sqlx::query(&sql);
     let mut cq = sqlx::query(&count_sql);
@@ -66,8 +142,8 @@ pub async fn get_public_products(
     }
     let search_pattern = search.map(|s| format!("%{}%", s));
     if let Some(ref pat) = search_pattern {
-        q = q.bind(pat);
-        cq = cq.bind(pat);
+        q = q.bind(pat).bind(pat).bind(pat).bind(pat).bind(pat);
+        cq = cq.bind(pat).bind(pat).bind(pat).bind(pat).bind(pat);
     }
 
     let rows = q.bind(limit).bind(offset).fetch_all(pool).await?;
@@ -77,24 +153,37 @@ pub async fn get_public_products(
     let items: Vec<Value> = rows
         .into_iter()
         .map(|r| {
+            let variants_count: i64 = r.try_get("variants_count").unwrap_or(0);
+            let min_price: f64 = r.try_get("min_price").unwrap_or(0.0);
+            let max_price: f64 = r.try_get("max_price").unwrap_or(min_price);
+            let total_stock: i64 = r.try_get("total_stock").unwrap_or(0);
+
             json!({
+                "id": r.try_get::<i64, _>("id").unwrap_or(0),
                 "product_code": r.try_get::<String, _>("product_code").unwrap_or_default(),
                 "category": r.try_get::<Option<String>, _>("category").ok().flatten(),
                 "name": r.try_get::<String, _>("name").unwrap_or_default(),
+                "variant_name": r.try_get::<Option<String>, _>("variant_name").ok().flatten(),
                 "slug": r.try_get::<Option<String>, _>("slug").ok().flatten(),
                 "description": r.try_get::<Option<String>, _>("description").ok().flatten(),
-                "price": r.try_get::<f64, _>("price").unwrap_or(0.0),
-                "stock": r.try_get::<i64, _>("stock").unwrap_or(0),
+                "price": min_price,
+                "min_price": min_price,
+                "max_price": max_price,
+                "stock": total_stock,
+                "total_stock": total_stock,
+                "variants_count": variants_count,
                 "delivery_type": r.try_get::<Option<String>, _>("delivery_type").ok().flatten(),
                 "thumbnail": r.try_get::<Option<String>, _>("thumbnail").ok().flatten(),
             })
         })
         .collect();
 
+    let categories = get_public_categories(state).await.unwrap_or_default();
     let total_pages = ((total as f64) / (limit as f64)).ceil().max(1.0) as i64;
 
     Ok(json!({
         "items": items,
+        "categories": categories,
         "pagination": {
             "total": total,
             "page": page,
@@ -104,32 +193,215 @@ pub async fn get_public_products(
     }))
 }
 
-pub async fn get_product_by_code(state: &AppState, product_code: &str) -> AppResult<Value> {
+pub async fn get_product_by_code(state: &AppState, code_or_id: &str) -> AppResult<Value> {
     let pool = state.db()?;
-    let row = sqlx::query(
-        r#"
-        SELECT product_code, category, name, slug, description, CAST(price AS DOUBLE) AS price, stock, delivery_type, thumbnail
-        FROM products WHERE product_code = ? AND status = 'active'
-        "#,
-    )
-    .bind(product_code)
-    .fetch_optional(pool)
-    .await?;
+    let numeric_id = code_or_id.parse::<i64>().ok();
 
-    let Some(r) = row else {
+    let row = if let Some(pid) = numeric_id {
+        sqlx::query(
+            r#"
+            SELECT id, parent_id, product_code, category, name, variant_name, slug, description,
+                   CAST(price AS DOUBLE) AS price, stock, delivery_type, thumbnail, sort_order
+            FROM products WHERE (id = ? OR product_code = ?) AND status = 'active' LIMIT 1
+            "#,
+        )
+        .bind(pid)
+        .bind(code_or_id)
+        .fetch_optional(pool)
+        .await?
+    } else {
+        sqlx::query(
+            r#"
+            SELECT id, parent_id, product_code, category, name, variant_name, slug, description,
+                   CAST(price AS DOUBLE) AS price, stock, delivery_type, thumbnail, sort_order
+            FROM products WHERE product_code = ? AND status = 'active' LIMIT 1
+            "#,
+        )
+        .bind(code_or_id)
+        .fetch_optional(pool)
+        .await?
+    };
+
+    let Some(requested) = row else {
         return Err(AppError::not_found("Sản phẩm không tồn tại hoặc đã bị ẩn"));
     };
 
+    let req_id: i64 = requested.try_get("id")?;
+    let req_parent_id: Option<i64> = requested.try_get("parent_id").ok().flatten();
+    let req_code: String = requested.try_get("product_code")?;
+
+    // If a child variant was requested directly, resolve its parent so the UI gets the full variant selector
+    let (parent_row, selected_variant_code) = if let Some(pid) = req_parent_id {
+        let p = sqlx::query(
+            r#"
+            SELECT id, parent_id, product_code, category, name, variant_name, slug, description,
+                   CAST(price AS DOUBLE) AS price, stock, delivery_type, thumbnail, sort_order
+            FROM products WHERE id = ? AND status = 'active' LIMIT 1
+            "#,
+        )
+        .bind(pid)
+        .fetch_optional(pool)
+        .await?;
+        match p {
+            Some(parent) => (parent, Some(req_code)),
+            None => (requested, None),
+        }
+    } else {
+        (requested, None)
+    };
+
+    let parent_id: i64 = parent_row.try_get("id")?;
+    let variant_rows = sqlx::query(
+        r#"
+        SELECT id, parent_id, product_code, category, name, variant_name, slug, description,
+               CAST(price AS DOUBLE) AS price, stock, delivery_type, thumbnail, sort_order
+        FROM products
+        WHERE parent_id = ? AND status = 'active'
+        ORDER BY sort_order ASC, price ASC
+        "#,
+    )
+    .bind(parent_id)
+    .fetch_all(pool)
+    .await?;
+
+    let variants: Vec<ProductVariant> = variant_rows
+        .into_iter()
+        .map(|v| ProductVariant {
+            id: v.try_get("id").unwrap_or(0),
+            parent_id: v.try_get("parent_id").ok().flatten(),
+            product_code: v.try_get("product_code").unwrap_or_default(),
+            category: v.try_get("category").ok().flatten(),
+            name: v.try_get("name").unwrap_or_default(),
+            variant_name: v.try_get("variant_name").ok().flatten(),
+            slug: v.try_get("slug").ok().flatten(),
+            description: v.try_get("description").ok().flatten(),
+            price: v.try_get("price").unwrap_or(0.0),
+            stock: v.try_get("stock").unwrap_or(0),
+            delivery_type: v.try_get("delivery_type").ok().flatten(),
+            thumbnail: v.try_get("thumbnail").ok().flatten(),
+            sort_order: v.try_get("sort_order").unwrap_or(0),
+        })
+        .collect();
+
+    let own_price: f64 = parent_row.try_get("price").unwrap_or(0.0);
+    let own_stock: i64 = parent_row.try_get("stock").unwrap_or(0);
+
+    let (min_price, max_price, total_stock) = if variants.is_empty() {
+        (own_price, own_price, own_stock)
+    } else {
+        let min_p = variants.iter().map(|v| v.price).fold(f64::INFINITY, f64::min);
+        let max_p = variants.iter().map(|v| v.price).fold(0.0_f64, f64::max);
+        let sum_s: i64 = variants.iter().map(|v| v.stock).sum();
+        (min_p, max_p, sum_s)
+    };
+
     Ok(json!({
-        "product_code": r.try_get::<String, _>("product_code")?,
-        "category": r.try_get::<Option<String>, _>("category").ok().flatten(),
-        "name": r.try_get::<String, _>("name")?,
-        "slug": r.try_get::<Option<String>, _>("slug").ok().flatten(),
-        "description": r.try_get::<Option<String>, _>("description").ok().flatten(),
-        "price": r.try_get::<f64, _>("price").unwrap_or(0.0),
-        "stock": r.try_get::<i64, _>("stock").unwrap_or(0),
-        "delivery_type": r.try_get::<Option<String>, _>("delivery_type").ok().flatten(),
-        "thumbnail": r.try_get::<Option<String>, _>("thumbnail").ok().flatten(),
+        "id": parent_id,
+        "requested_id": req_id,
+        "selected_variant_code": selected_variant_code,
+        "product_code": parent_row.try_get::<String, _>("product_code")?,
+        "category": parent_row.try_get::<Option<String>, _>("category").ok().flatten(),
+        "name": parent_row.try_get::<String, _>("name")?,
+        "variant_name": parent_row.try_get::<Option<String>, _>("variant_name").ok().flatten(),
+        "slug": parent_row.try_get::<Option<String>, _>("slug").ok().flatten(),
+        "description": parent_row.try_get::<Option<String>, _>("description").ok().flatten(),
+        "price": min_price,
+        "min_price": min_price,
+        "max_price": max_price,
+        "stock": total_stock,
+        "total_stock": total_stock,
+        "variants_count": variants.len(),
+        "variants": variants,
+        "delivery_type": parent_row.try_get::<Option<String>, _>("delivery_type").ok().flatten(),
+        "thumbnail": parent_row.try_get::<Option<String>, _>("thumbnail").ok().flatten(),
+    }))
+}
+
+pub async fn get_admin_products(
+    state: &AppState,
+    page: i64,
+    limit: i64,
+    search: Option<&str>,
+    category: Option<&str>,
+    status: Option<&str>,
+) -> AppResult<Value> {
+    let pool = state.db()?;
+    let page = page.max(1);
+    let limit = limit.clamp(1, 200);
+    let offset = (page - 1) * limit;
+
+    let mut sql = String::from(
+        r#"
+        SELECT id, parent_id, product_code, category, name, variant_name, slug, description,
+               CAST(price AS DOUBLE) AS price, stock, delivery_type, status, thumbnail, sort_order, created_at
+        FROM products WHERE 1=1
+        "#,
+    );
+    let mut count_sql = String::from("SELECT COUNT(id) AS total FROM products WHERE 1=1");
+
+    if category.is_some() {
+        sql.push_str(" AND category = ?");
+        count_sql.push_str(" AND category = ?");
+    }
+    if status.is_some() {
+        sql.push_str(" AND status = ?");
+        count_sql.push_str(" AND status = ?");
+    }
+    if search.is_some() {
+        sql.push_str(" AND (name LIKE ? OR product_code LIKE ? OR variant_name LIKE ?)");
+        count_sql.push_str(" AND (name LIKE ? OR product_code LIKE ? OR variant_name LIKE ?)");
+    }
+    sql.push_str(" ORDER BY COALESCE(parent_id, id) ASC, parent_id IS NOT NULL ASC, sort_order ASC, id ASC LIMIT ? OFFSET ?");
+
+    let mut q = sqlx::query(&sql);
+    let mut cq = sqlx::query(&count_sql);
+
+    if let Some(cat) = category {
+        q = q.bind(cat);
+        cq = cq.bind(cat);
+    }
+    if let Some(st) = status {
+        q = q.bind(st);
+        cq = cq.bind(st);
+    }
+    let search_pat = search.map(|s| format!("%{}%", s));
+    if let Some(ref pat) = search_pat {
+        q = q.bind(pat).bind(pat).bind(pat);
+        cq = cq.bind(pat).bind(pat).bind(pat);
+    }
+
+    let rows = q.bind(limit).bind(offset).fetch_all(pool).await?;
+    let count_row = cq.fetch_one(pool).await?;
+    let total: i64 = count_row.try_get("total").unwrap_or(0);
+
+    let items: Vec<Value> = rows
+        .into_iter()
+        .map(|r| {
+            let created_at: Option<DateTime<Utc>> = r.try_get("created_at").ok().flatten();
+            json!({
+                "id": r.try_get::<i64, _>("id").unwrap_or(0),
+                "parent_id": r.try_get::<Option<i64>, _>("parent_id").ok().flatten(),
+                "product_code": r.try_get::<String, _>("product_code").unwrap_or_default(),
+                "category": r.try_get::<Option<String>, _>("category").ok().flatten(),
+                "name": r.try_get::<String, _>("name").unwrap_or_default(),
+                "variant_name": r.try_get::<Option<String>, _>("variant_name").ok().flatten(),
+                "slug": r.try_get::<Option<String>, _>("slug").ok().flatten(),
+                "description": r.try_get::<Option<String>, _>("description").ok().flatten(),
+                "price": r.try_get::<f64, _>("price").unwrap_or(0.0),
+                "stock": r.try_get::<i64, _>("stock").unwrap_or(0),
+                "delivery_type": r.try_get::<Option<String>, _>("delivery_type").ok().flatten(),
+                "status": r.try_get::<String, _>("status").unwrap_or_default(),
+                "thumbnail": r.try_get::<Option<String>, _>("thumbnail").ok().flatten(),
+                "sort_order": r.try_get::<i64, _>("sort_order").unwrap_or(0),
+                "created_at": created_at,
+            })
+        })
+        .collect();
+
+    let total_pages = ((total as f64) / (limit as f64)).ceil().max(1.0) as i64;
+    Ok(json!({
+        "items": items,
+        "pagination": { "total": total, "page": page, "limit": limit, "total_pages": total_pages }
     }))
 }
 
@@ -147,34 +419,50 @@ pub async fn create_product(state: &AppState, data: &Map<String, Value>) -> AppR
         .ok_or_else(|| AppError::bad_request("Thiếu thông tin product_code hoặc name"))?;
 
     let slug = generate_slug(name);
-    let category = data.get("category").and_then(Value::as_str);
+    let parent_id = data.get("parent_id").and_then(Value::as_i64);
+    let variant_name = data
+        .get("variant_name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let category = data.get("category").and_then(Value::as_str).unwrap_or("account");
     let description = data.get("description").and_then(Value::as_str);
     let price = data.get("price").and_then(Value::as_f64).unwrap_or(0.0);
     let delivery_type = data
         .get("delivery_type")
         .and_then(Value::as_str)
         .unwrap_or("manual");
+    let status = data
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("active");
     let thumbnail = data.get("thumbnail").and_then(Value::as_str);
+    let sort_order = data.get("sort_order").and_then(Value::as_i64).unwrap_or(0);
 
     let res = sqlx::query(
         r#"
-        INSERT INTO products (product_code, category, name, slug, description, price, delivery_type, thumbnail)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO products
+        (parent_id, product_code, category, name, variant_name, slug, description, price, delivery_type, status, thumbnail, sort_order)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
+    .bind(parent_id)
     .bind(product_code)
     .bind(category)
     .bind(name)
+    .bind(variant_name)
     .bind(&slug)
     .bind(description)
     .bind(price)
     .bind(delivery_type)
+    .bind(status)
     .bind(thumbnail)
+    .bind(sort_order)
     .execute(pool)
     .await
     .map_err(|e| {
         if e.to_string().contains("Duplicate entry") {
-            AppError::bad_request("Product Code đã tồn tại")
+            AppError::bad_request("Product Code hoặc Slug đã tồn tại")
         } else {
             AppError::Database(e)
         }
@@ -191,8 +479,8 @@ pub async fn update_product(
     let pool = state.db()?;
     let existing = sqlx::query(
         r#"
-        SELECT product_code, category, name, slug, description, CAST(price AS DOUBLE) AS price,
-               delivery_type, status, thumbnail, sort_order
+        SELECT parent_id, product_code, category, name, variant_name, slug, description,
+               CAST(price AS DOUBLE) AS price, delivery_type, status, thumbnail, sort_order
         FROM products WHERE id = ?
         "#,
     )
@@ -204,6 +492,11 @@ pub async fn update_product(
         return Err(AppError::bad_request("Sản phẩm không tồn tại"));
     };
 
+    let parent_id = if data.contains_key("parent_id") {
+        data.get("parent_id").and_then(Value::as_i64)
+    } else {
+        row.try_get("parent_id").ok().flatten()
+    };
     let product_code = data
         .get("product_code")
         .and_then(Value::as_str)
@@ -219,6 +512,14 @@ pub async fn update_product(
         .and_then(Value::as_str)
         .map(String::from)
         .unwrap_or_else(|| row.try_get("name").unwrap_or_default());
+    let variant_name = if data.contains_key("variant_name") {
+        data.get("variant_name")
+            .and_then(Value::as_str)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    } else {
+        row.try_get("variant_name").ok().flatten()
+    };
     let slug = if data.contains_key("name") {
         generate_slug(&name)
     } else {
@@ -256,14 +557,16 @@ pub async fn update_product(
     sqlx::query(
         r#"
         UPDATE products
-        SET product_code = ?, category = ?, name = ?, slug = ?, description = ?,
-            price = ?, delivery_type = ?, status = ?, thumbnail = ?, sort_order = ?
+        SET parent_id = ?, product_code = ?, category = ?, name = ?, variant_name = ?,
+            slug = ?, description = ?, price = ?, delivery_type = ?, status = ?, thumbnail = ?, sort_order = ?
         WHERE id = ?
         "#,
     )
+    .bind(parent_id)
     .bind(product_code)
     .bind(category)
     .bind(name)
+    .bind(variant_name)
     .bind(slug)
     .bind(description)
     .bind(price)

@@ -23,6 +23,7 @@ use crate::{
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/me", get(get_me_ep))
         .route("/login/{provider}", get(oauth_login))
         .route("/github/callback", get(github_callback))
         .route("/discord/callback", get(discord_callback))
@@ -543,4 +544,19 @@ async fn logout_all(
         updated_jar,
         Json(json!({ "success": true, "message": "Đã đăng xuất khỏi toàn bộ thiết bị" })),
     ))
+}
+
+async fn get_me_ep(State(state): State<AppState>, user: AuthUser) -> Json<Value> {
+    let is_admin = user.is_admin(&state);
+    Json(json!({
+        "success": true,
+        "data": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "avatar": user.avatar,
+            "providers": user.providers,
+            "is_admin": is_admin,
+        }
+    }))
 }

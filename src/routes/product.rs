@@ -9,13 +9,14 @@ use serde_json::Value;
 use crate::{
     core::response::send_success,
     error::AppResult,
-    services::product::{get_product_by_code, get_public_products},
+    services::product::{get_product_by_code, get_public_categories, get_public_products},
     state::AppState,
 };
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(get_public_products_ep))
+        .route("/categories", get(get_categories_ep))
         .route("/{product_code}", get(get_product_detail_ep))
 }
 
@@ -42,6 +43,11 @@ async fn get_public_products_ep(
     )
     .await?;
     Ok(send_success("Lấy danh sách sản phẩm thành công", data))
+}
+
+async fn get_categories_ep(State(state): State<AppState>) -> AppResult<Json<Value>> {
+    let categories = get_public_categories(&state).await?;
+    Ok(send_success("Lấy danh mục sản phẩm thành công", categories))
 }
 
 async fn get_product_detail_ep(

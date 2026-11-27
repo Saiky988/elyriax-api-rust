@@ -21,6 +21,14 @@ pub struct AuthUser {
     pub is_static_admin: bool,
 }
 
+impl AuthUser {
+    pub fn is_admin(&self, state: &AppState) -> bool {
+        self.is_static_admin
+            || state.config.is_admin_email(self.email.as_deref())
+            || (state.config.admin_emails.is_empty() && self.id == 1)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AdminUser(pub AuthUser);
 
@@ -36,26 +44,28 @@ pub struct SepayWebhookAuth;
 pub struct GoAdminAuth;
 
 async fn extract_optional_user(parts: &Parts, state: &AppState) -> Result<Option<AuthUser>, AppError> {
-    // 0. Static admin credentials via headers
-    let admin_user = parts
-        .headers
-        .get("x-admin-user")
-        .and_then(|v| v.to_str().ok());
-    let admin_pass = parts
-        .headers
-        .get("x-admin-pass")
-        .and_then(|v| v.to_str().ok());
+    // 0. Optional legacy static admin credentials via headers (only if configured in .env)
+    if !state.config.admin_username.is_empty() && !state.config.admin_password.is_empty() {
+        let admin_user = parts
+            .headers
+            .get("x-admin-user")
+            .and_then(|v| v.to_str().ok());
+        let admin_pass = parts
+            .headers
+            .get("x-admin-pass")
+            .and_then(|v| v.to_str().ok());
 
-    if let (Some(u), Some(p)) = (admin_user, admin_pass) {
-        if u == state.config.admin_username && p == state.config.admin_password {
-            return Ok(Some(AuthUser {
-                id: 1,
-                username: u.to_string(),
-                email: None,
-                avatar: None,
-                providers: vec![],
-                is_static_admin: true,
-            }));
+        if let (Some(u), Some(p)) = (admin_user, admin_pass) {
+            if u == state.config.admin_username && p == state.config.admin_password {
+                return Ok(Some(AuthUser {
+                    id: 1,
+                    username: u.to_string(),
+                    email: state.config.admin_emails.first().cloned(),
+                    avatar: None,
+                    providers: vec![],
+                    is_static_admin: true,
+                }));
+            }
         }
     }
 
@@ -111,7 +121,7 @@ impl FromRequestParts<AppState> for AdminUser {
     ) -> Result<Self, Self::Rejection> {
         let user = AuthUser::from_request_parts(parts, state).await?;
 
-        if user.is_static_admin || user.id == 1 {
+        if user.is_admin(state) {
             return Ok(AdminUser(user));
         }
 
@@ -176,21 +186,14 @@ impl FromRequestParts<AppState> for GoAdminAuth {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let admin_user = parts
-            .headers
-            .get("x-admin-user")
-            .and_then(|v| v.to_str().ok());
-        let admin_pass = parts
-            .headers
-            .get("x-admin-pass")
-            .and_then(|v| v.to_str().ok());
-
-        if let (Some(u), Some(p)) = (admin_user, admin_pass) {
-            if u == state.config.admin_username && p == state.config.admin_password {
+        // 1. Authenticated Admin user via Session/JWT (`ADMIN=...` email)
+        if let Ok(Some(user)) = extract_optional_user(parts, state).await {
+            if user.is_admin(state) {
                 return Ok(GoAdminAuth);
             }
         }
 
+        // 2. Optional legacy ADMIN_TOKEN
         if !state.config.admin_token.is_empty() {
             if let Some(auth_val) = parts
                 .headers
