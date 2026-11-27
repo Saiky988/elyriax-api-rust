@@ -23,6 +23,7 @@ pub struct ProductVariant {
     pub price: f64,
     pub stock: i64,
     pub delivery_type: Option<String>,
+    pub require_profile_type: String,
     pub thumbnail: Option<String>,
     pub sort_order: i64,
 }
@@ -92,6 +93,7 @@ pub async fn get_public_products(
             CAST(p.price AS DOUBLE) AS price,
             p.stock,
             p.delivery_type,
+            COALESCE(p.require_profile_type, 'none') AS require_profile_type,
             p.thumbnail,
             COALESCE(v.variants_count, 0) AS variants_count,
             CAST(COALESCE(v.min_price, p.price) AS DOUBLE) AS min_price,
@@ -173,6 +175,7 @@ pub async fn get_public_products(
                 "total_stock": total_stock,
                 "variants_count": variants_count,
                 "delivery_type": r.try_get::<Option<String>, _>("delivery_type").ok().flatten(),
+                "require_profile_type": r.try_get::<String, _>("require_profile_type").unwrap_or_else(|_| "none".to_string()),
                 "thumbnail": r.try_get::<Option<String>, _>("thumbnail").ok().flatten(),
             })
         })
@@ -201,7 +204,7 @@ pub async fn get_product_by_code(state: &AppState, code_or_id: &str) -> AppResul
         sqlx::query(
             r#"
             SELECT id, parent_id, product_code, category, name, variant_name, slug, description,
-                   CAST(price AS DOUBLE) AS price, stock, delivery_type, thumbnail, sort_order
+                   CAST(price AS DOUBLE) AS price, stock, delivery_type, COALESCE(require_profile_type, 'none') AS require_profile_type, thumbnail, sort_order
             FROM products WHERE (id = ? OR product_code = ?) AND status = 'active' LIMIT 1
             "#,
         )
@@ -213,7 +216,7 @@ pub async fn get_product_by_code(state: &AppState, code_or_id: &str) -> AppResul
         sqlx::query(
             r#"
             SELECT id, parent_id, product_code, category, name, variant_name, slug, description,
-                   CAST(price AS DOUBLE) AS price, stock, delivery_type, thumbnail, sort_order
+                   CAST(price AS DOUBLE) AS price, stock, delivery_type, COALESCE(require_profile_type, 'none') AS require_profile_type, thumbnail, sort_order
             FROM products WHERE product_code = ? AND status = 'active' LIMIT 1
             "#,
         )
@@ -235,7 +238,7 @@ pub async fn get_product_by_code(state: &AppState, code_or_id: &str) -> AppResul
         let p = sqlx::query(
             r#"
             SELECT id, parent_id, product_code, category, name, variant_name, slug, description,
-                   CAST(price AS DOUBLE) AS price, stock, delivery_type, thumbnail, sort_order
+                   CAST(price AS DOUBLE) AS price, stock, delivery_type, COALESCE(require_profile_type, 'none') AS require_profile_type, thumbnail, sort_order
             FROM products WHERE id = ? AND status = 'active' LIMIT 1
             "#,
         )
@@ -254,7 +257,7 @@ pub async fn get_product_by_code(state: &AppState, code_or_id: &str) -> AppResul
     let variant_rows = sqlx::query(
         r#"
         SELECT id, parent_id, product_code, category, name, variant_name, slug, description,
-               CAST(price AS DOUBLE) AS price, stock, delivery_type, thumbnail, sort_order
+               CAST(price AS DOUBLE) AS price, stock, delivery_type, COALESCE(require_profile_type, 'none') AS require_profile_type, thumbnail, sort_order
         FROM products
         WHERE parent_id = ? AND status = 'active'
         ORDER BY sort_order ASC, price ASC
@@ -278,6 +281,7 @@ pub async fn get_product_by_code(state: &AppState, code_or_id: &str) -> AppResul
             price: v.try_get("price").unwrap_or(0.0),
             stock: v.try_get("stock").unwrap_or(0),
             delivery_type: v.try_get("delivery_type").ok().flatten(),
+            require_profile_type: v.try_get::<String, _>("require_profile_type").unwrap_or_else(|_| "none".to_string()),
             thumbnail: v.try_get("thumbnail").ok().flatten(),
             sort_order: v.try_get("sort_order").unwrap_or(0),
         })
@@ -313,6 +317,7 @@ pub async fn get_product_by_code(state: &AppState, code_or_id: &str) -> AppResul
         "variants_count": variants.len(),
         "variants": variants,
         "delivery_type": parent_row.try_get::<Option<String>, _>("delivery_type").ok().flatten(),
+        "require_profile_type": parent_row.try_get::<String, _>("require_profile_type").unwrap_or_else(|_| "none".to_string()),
         "thumbnail": parent_row.try_get::<Option<String>, _>("thumbnail").ok().flatten(),
     }))
 }
@@ -333,7 +338,7 @@ pub async fn get_admin_products(
     let mut sql = String::from(
         r#"
         SELECT id, parent_id, product_code, category, name, variant_name, slug, description,
-               CAST(price AS DOUBLE) AS price, stock, delivery_type, status, thumbnail, sort_order,
+               CAST(price AS DOUBLE) AS price, stock, delivery_type, COALESCE(require_profile_type, 'none') AS require_profile_type, status, thumbnail, sort_order,
                provider_name, provider_product_id,
                CAST(COALESCE(provider_markup_percent, 10.00) AS DOUBLE) AS provider_markup_percent,
                CAST(provider_base_price AS DOUBLE) AS provider_base_price,
@@ -395,6 +400,7 @@ pub async fn get_admin_products(
                 "price": r.try_get::<f64, _>("price").unwrap_or(0.0),
                 "stock": r.try_get::<i64, _>("stock").unwrap_or(0),
                 "delivery_type": r.try_get::<Option<String>, _>("delivery_type").ok().flatten(),
+                "require_profile_type": r.try_get::<String, _>("require_profile_type").unwrap_or_else(|_| "none".to_string()),
                 "status": r.try_get::<String, _>("status").unwrap_or_default(),
                 "thumbnail": r.try_get::<Option<String>, _>("thumbnail").ok().flatten(),
                 "sort_order": r.try_get::<i64, _>("sort_order").unwrap_or(0),
@@ -443,6 +449,19 @@ pub async fn create_product(state: &AppState, data: &Map<String, Value>) -> AppR
         .get("delivery_type")
         .and_then(Value::as_str)
         .unwrap_or("manual");
+    let require_profile_type = match data
+        .get("require_profile_type")
+        .and_then(Value::as_str)
+        .unwrap_or("none")
+        .trim()
+        .to_lowercase()
+        .as_str()
+    {
+        "email" => "email",
+        "account" => "account",
+        "any" => "any",
+        _ => "none",
+    };
     let status = data
         .get("status")
         .and_then(Value::as_str)
@@ -469,8 +488,8 @@ pub async fn create_product(state: &AppState, data: &Map<String, Value>) -> AppR
     let res = sqlx::query(
         r#"
         INSERT INTO products
-        (parent_id, product_code, category, name, variant_name, slug, description, price, stock, delivery_type, status, thumbnail, sort_order, provider_name, provider_product_id, provider_markup_percent, provider_base_price)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (parent_id, product_code, category, name, variant_name, slug, description, price, stock, delivery_type, require_profile_type, status, thumbnail, sort_order, provider_name, provider_product_id, provider_markup_percent, provider_base_price)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(parent_id)
@@ -483,6 +502,7 @@ pub async fn create_product(state: &AppState, data: &Map<String, Value>) -> AppR
     .bind(price)
     .bind(stock)
     .bind(delivery_type)
+    .bind(require_profile_type)
     .bind(status)
     .bind(thumbnail)
     .bind(sort_order)
@@ -512,7 +532,7 @@ pub async fn update_product(
     let existing = sqlx::query(
         r#"
         SELECT parent_id, product_code, category, name, variant_name, slug, description,
-               CAST(price AS DOUBLE) AS price, stock, delivery_type, status, thumbnail, sort_order,
+               CAST(price AS DOUBLE) AS price, stock, delivery_type, COALESCE(require_profile_type, 'none') AS require_profile_type, status, thumbnail, sort_order,
                provider_name, provider_product_id,
                CAST(COALESCE(provider_markup_percent, 10.00) AS DOUBLE) AS provider_markup_percent,
                CAST(provider_base_price AS DOUBLE) AS provider_base_price
@@ -575,6 +595,16 @@ pub async fn update_product(
         .and_then(Value::as_str)
         .map(String::from)
         .unwrap_or_else(|| row.try_get("delivery_type").unwrap_or_else(|_| "manual".to_string()));
+    let require_profile_type = if let Some(rpt) = data.get("require_profile_type").and_then(Value::as_str) {
+        match rpt.trim().to_lowercase().as_str() {
+            "email" => "email".to_string(),
+            "account" => "account".to_string(),
+            "any" => "any".to_string(),
+            _ => "none".to_string(),
+        }
+    } else {
+        row.try_get("require_profile_type").unwrap_or_else(|_| "none".to_string())
+    };
     let status = data
         .get("status")
         .and_then(Value::as_str)
@@ -628,7 +658,7 @@ pub async fn update_product(
         r#"
         UPDATE products
         SET parent_id = ?, product_code = ?, category = ?, name = ?, variant_name = ?,
-            slug = ?, description = ?, price = ?, stock = ?, delivery_type = ?, status = ?, thumbnail = ?, sort_order = ?,
+            slug = ?, description = ?, price = ?, stock = ?, delivery_type = ?, require_profile_type = ?, status = ?, thumbnail = ?, sort_order = ?,
             provider_name = ?, provider_product_id = ?, provider_markup_percent = ?, provider_base_price = ?
         WHERE id = ?
         "#,
@@ -643,6 +673,7 @@ pub async fn update_product(
     .bind(price)
     .bind(stock)
     .bind(delivery_type)
+    .bind(require_profile_type)
     .bind(status)
     .bind(thumbnail)
     .bind(sort_order)

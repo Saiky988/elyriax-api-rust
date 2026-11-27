@@ -1,6 +1,7 @@
 use axum::{
-    extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    body::Body,
+    extract::{Multipart, Path, Query, State},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
@@ -24,6 +25,8 @@ use crate::{
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/me", get(get_me_ep))
+        .route("/avatar", post(upload_avatar_ep).patch(update_avatar_url_ep))
+        .route("/avatar/{filename}", get(serve_avatar_ep))
         .route("/login/{provider}", get(oauth_login))
         .route("/github/callback", get(github_callback))
         .route("/discord/callback", get(discord_callback))
@@ -559,4 +562,143 @@ async fn get_me_ep(State(state): State<AppState>, user: AuthUser) -> Json<Value>
             "is_admin": is_admin,
         }
     }))
+}
+
+/* ========================= AVATAR UPLOAD (GIF/PNG/JPG/WEBP/AVIF/SVG) ========================= */
+
+fn detect_avatar_ext_and_mime(filename: &str, content_type: &str) -> Option<(&'static str, &'static str)> {
+    let ct = content_type.to_lowercase();
+    let lower = filename.to_lowercase();
+    if ct.contains("gif") || lower.ends_with(".gif") {
+        Some(("gif", "image/gif"))
+    } else if ct.contains("png") || lower.ends_with(".png") {
+        Some(("png", "image/png"))
+    } else if ct.contains("webp") || lower.ends_with(".webp") {
+        Some(("webp", "image/webp"))
+    } else if ct.contains("avif") || lower.ends_with(".avif") {
+        Some(("avif", "image/avif"))
+    } else if ct.contains("svg") || lower.ends_with(".svg") {
+        Some(("svg", "image/svg+xml"))
+    } else if ct.contains("jpeg") || ct.contains("jpg") || lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        Some(("jpg", "image/jpeg"))
+    } else {
+        None
+    }
+}
+
+async fn upload_avatar_ep(
+    State(state): State<AppState>,
+    user: AuthUser,
+    mut multipart: Multipart,
+) -> AppResult<Json<Value>> {
+    const MAX_AVATAR_BYTES: usize = 10 * 1024 * 1024; // 10 MB (supports animated GIFs)
+
+    let mut saved_url: Option<String> = None;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| crate::error::AppError::bad_request(format!("Lỗi đọc dữ liệu ảnh: {e}")))?
+    {
+        let fname = field.file_name().unwrap_or("avatar.png").to_string();
+        let ctype = field.content_type().unwrap_or("").to_string();
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|e| crate::error::AppError::bad_request(format!("Lỗi tải file ảnh: {e}")))?;
+        if bytes.is_empty() {
+            continue;
+        }
+        if bytes.len() > MAX_AVATAR_BYTES {
+            return Err(crate::error::AppError::bad_request(
+                "Ảnh đại diện tối đa 10MB",
+            ));
+        }
+
+        let Some((ext, _mime)) = detect_avatar_ext_and_mime(&fname, &ctype) else {
+            return Err(crate::error::AppError::bad_request(
+                "Định dạng ảnh không hỗ trợ (hỗ trợ GIF, PNG, JPG, WebP, AVIF, SVG)",
+            ));
+        };
+
+        let dir = state.config.uploads_dir().join("avatars");
+        tokio::fs::create_dir_all(&dir).await?;
+        let ts = chrono::Utc::now().timestamp_millis();
+        let out_name = format!("u{}_{}.{}", user.id, ts, ext);
+        let out_path = dir.join(&out_name);
+        tokio::fs::write(&out_path, &bytes).await?;
+
+        saved_url = Some(format!("{}/v1/auth/avatar/{}", state.config.base_url, out_name));
+        break;
+    }
+
+    let Some(avatar_url) = saved_url else {
+        return Err(crate::error::AppError::bad_request("Không tìm thấy file ảnh tải lên"));
+    };
+
+    let pool = state.db()?;
+    sqlx::query("UPDATE users SET avatar = ? WHERE id = ?")
+        .bind(&avatar_url)
+        .bind(user.id)
+        .execute(pool)
+        .await?;
+
+    Ok(Json(json!({
+        "success": true,
+        "message": "Đã cập nhật ảnh đại diện",
+        "data": { "avatar": avatar_url }
+    })))
+}
+
+#[derive(Deserialize)]
+struct AvatarUrlBody {
+    avatar_url: String,
+}
+
+async fn update_avatar_url_ep(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Json(body): Json<AvatarUrlBody>,
+) -> AppResult<Json<Value>> {
+    let url = body.avatar_url.trim().to_string();
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err(crate::error::AppError::bad_request(
+            "URL ảnh đại diện phải bắt đầu bằng http:// hoặc https://",
+        ));
+    }
+    let pool = state.db()?;
+    sqlx::query("UPDATE users SET avatar = ? WHERE id = ?")
+        .bind(&url)
+        .bind(user.id)
+        .execute(pool)
+        .await?;
+
+    Ok(Json(json!({
+        "success": true,
+        "message": "Đã cập nhật ảnh đại diện",
+        "data": { "avatar": url }
+    })))
+}
+
+async fn serve_avatar_ep(
+    State(state): State<AppState>,
+    Path(filename): Path<String>,
+) -> Response {
+    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+        return (StatusCode::BAD_REQUEST, "Invalid filename").into_response();
+    }
+    let path = state.config.uploads_dir().join("avatars").join(&filename);
+    let Ok(bytes) = tokio::fs::read(&path).await else {
+        return (StatusCode::NOT_FOUND, "Avatar not found").into_response();
+    };
+    let mime = detect_avatar_ext_and_mime(&filename, "")
+        .map(|(_, m)| m)
+        .unwrap_or("application/octet-stream");
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, mime)
+        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Response error").into_response())
 }

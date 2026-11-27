@@ -1,6 +1,7 @@
 pub mod api_key;
 pub mod auth;
 pub mod cart;
+pub mod delivery_profile;
 pub mod email;
 pub mod genshin;
 pub mod go;

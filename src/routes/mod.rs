@@ -2,6 +2,7 @@ pub mod admin_product;
 pub mod admin_scheduler;
 pub mod auth;
 pub mod cart;
+pub mod delivery_profile;
 pub mod email;
 pub mod evn;
 pub mod file_up;
@@ -48,6 +49,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health", get(health_check))
         .nest("/v1/host", host::router())
         .nest("/v1/auth", auth::router())
+        .nest("/v1/user", delivery_profile::router())
         .nest("/v1/settings", settings::router())
         .nest("/v1/cart", cart::router())
         .nest("/v1/orders", order::router())

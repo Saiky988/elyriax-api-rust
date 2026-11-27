@@ -9,19 +9,25 @@ use serde_json::Value;
 use crate::{
     core::{auth::AuthUser, response::send_success},
     error::AppResult,
-    services::order::{cancel_order, checkout, get_order_by_id, get_orders},
+    services::order::{cancel_order, checkout, get_order_by_id, get_orders, CheckoutRequest},
     state::AppState,
 };
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", post(checkout_ep).get(get_orders_ep))
+        .route("/checkout", post(checkout_ep))
         .route("/{order_id}", get(get_order_by_id_ep))
         .route("/{order_id}/cancel", post(cancel_order_ep))
 }
 
-async fn checkout_ep(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<Value>> {
-    let data = checkout(&state, user.id).await?;
+async fn checkout_ep(
+    State(state): State<AppState>,
+    user: AuthUser,
+    body: Option<Json<CheckoutRequest>>,
+) -> AppResult<Json<Value>> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let data = checkout(&state, user.id, req).await?;
     Ok(send_success("Thanh toán đơn hàng thành công", data))
 }
 
@@ -41,7 +47,7 @@ async fn get_orders_ep(
         &state,
         user.id,
         q.page.unwrap_or(1),
-        q.limit.unwrap_or(10),
+        q.limit.unwrap_or(20),
         q.status.as_deref(),
     )
     .await?;

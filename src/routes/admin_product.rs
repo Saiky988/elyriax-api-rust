@@ -37,6 +37,7 @@ pub fn router() -> Router<AppState> {
             patch(update_product_ep).delete(delete_product_ep),
         )
         .route("/products/{prod_id}/items/import", post(import_items_ep))
+        .route("/products/{prod_id}/items/bulk", post(import_items_ep))
         .route("/products/{prod_id}/items", get(get_items_ep))
         .route(
             "/product-items/{item_id}",
@@ -53,6 +54,7 @@ pub fn router() -> Router<AppState> {
         // Orders
         .route("/orders", get(list_admin_orders_ep))
         .route("/orders/{order_id}", patch(update_admin_order_ep))
+        .route("/orders/{order_id}/status", patch(update_admin_order_ep))
         // Providers (AppMMO price-sync)
         .route("/providers", get(list_providers_ep))
         .route("/providers/{provider}/catalog", get(provider_catalog_ep))
@@ -90,6 +92,11 @@ async fn admin_overview_ep(
     )
     .fetch_one(pool)
     .await?;
+    let processing_orders_row = sqlx::query(
+        "SELECT COUNT(id) AS total FROM orders WHERE status IN ('processing', 'pending')",
+    )
+    .fetch_one(pool)
+    .await?;
 
     let scheduler = get_scheduler_status(&state).await;
 
@@ -104,6 +111,7 @@ async fn admin_overview_ep(
             "wallets_total_balance": wallet_row.try_get::<f64, _>("total_balance").unwrap_or(0.0),
             "wallets_total_deposit": wallet_row.try_get::<f64, _>("total_deposit").unwrap_or(0.0),
             "pending_deposits": pending_tx_row.try_get::<i64, _>("total").unwrap_or(0),
+            "processing_orders": processing_orders_row.try_get::<i64, _>("total").unwrap_or(0),
             "scheduler": scheduler,
         }),
     ))
@@ -168,6 +176,7 @@ async fn delete_product_ep(
 #[derive(Deserialize)]
 struct ImportItemsBody {
     content: Option<Vec<String>>,
+    lines: Option<String>,
 }
 
 async fn import_items_ep(
@@ -176,10 +185,19 @@ async fn import_items_ep(
     Path(prod_id): Path<i64>,
     Json(body): Json<ImportItemsBody>,
 ) -> AppResult<Json<Value>> {
-    let content = body
-        .content
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| AppError::bad_request("Dữ liệu import không hợp lệ"))?;
+    let content: Vec<String> = if let Some(list) = body.content.filter(|v| !v.is_empty()) {
+        list
+    } else if let Some(raw) = body.lines {
+        raw.lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if content.is_empty() {
+        return Err(AppError::bad_request("Dữ liệu import không hợp lệ"));
+    }
     let result = import_product_items(&state, prod_id, content).await?;
     Ok(send_success("Import kho hàng thành công", result))
 }
@@ -693,7 +711,7 @@ async fn list_admin_orders_ep(
 ) -> AppResult<Json<Value>> {
     let pool = state.db()?;
     let page = q.page.unwrap_or(1).max(1);
-    let limit = q.limit.unwrap_or(20).clamp(1, 100);
+    let limit = q.limit.unwrap_or(25).clamp(1, 100);
     let offset = (page - 1) * limit;
 
     let mut sql = String::from(
@@ -702,7 +720,7 @@ async fn list_admin_orders_ep(
             o.id, o.order_code, o.user_id,
             CAST(o.subtotal AS DOUBLE) AS subtotal,
             CAST(o.total AS DOUBLE) AS total,
-            o.currency, o.status, o.created_at, o.completed_at,
+            o.currency, o.status, o.admin_note, o.created_at, o.completed_at,
             u.username, u.email
         FROM orders o
         LEFT JOIN users u ON u.id = o.user_id
@@ -713,24 +731,42 @@ async fn list_admin_orders_ep(
         "SELECT COUNT(o.id) AS total FROM orders o LEFT JOIN users u ON u.id = o.user_id WHERE 1=1",
     );
 
-    if q.status.is_some() {
-        sql.push_str(" AND o.status = ?");
-        count_sql.push_str(" AND o.status = ?");
+    let status_filter = q
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("all"));
+
+    if let Some(st) = status_filter {
+        if st.eq_ignore_ascii_case("processing") {
+            sql.push_str(" AND o.status IN ('processing', 'pending')");
+            count_sql.push_str(" AND o.status IN ('processing', 'pending')");
+        } else {
+            sql.push_str(" AND o.status = ?");
+            count_sql.push_str(" AND o.status = ?");
+        }
     }
-    if q.search.is_some() {
+    if q.search.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_some() {
         sql.push_str(" AND (o.order_code LIKE ? OR u.email LIKE ? OR u.username LIKE ?)");
         count_sql.push_str(" AND (o.order_code LIKE ? OR u.email LIKE ? OR u.username LIKE ?)");
     }
-    sql.push_str(" ORDER BY o.id DESC LIMIT ? OFFSET ?");
+    sql.push_str(" ORDER BY CASE WHEN o.status IN ('processing', 'pending') THEN 0 ELSE 1 END ASC, o.id DESC LIMIT ? OFFSET ?");
 
     let mut query = sqlx::query(&sql);
     let mut cquery = sqlx::query(&count_sql);
 
-    if let Some(ref st) = q.status {
-        query = query.bind(st);
-        cquery = cquery.bind(st);
+    if let Some(st) = status_filter {
+        if !st.eq_ignore_ascii_case("processing") {
+            query = query.bind(st);
+            cquery = cquery.bind(st);
+        }
     }
-    let pat = q.search.as_ref().map(|s| format!("%{}%", s));
+    let pat = q
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("%{s}%"));
     if let Some(ref p) = pat {
         query = query.bind(p).bind(p).bind(p);
         cquery = cquery.bind(p).bind(p).bind(p);
@@ -738,33 +774,96 @@ async fn list_admin_orders_ep(
 
     let rows = query.bind(limit).bind(offset).fetch_all(pool).await?;
     let total: i64 = cquery.fetch_one(pool).await?.try_get("total").unwrap_or(0);
+    let processing_count: i64 = sqlx::query(
+        "SELECT COUNT(id) AS total FROM orders WHERE status IN ('processing', 'pending')",
+    )
+    .fetch_one(pool)
+    .await?
+    .try_get("total")
+    .unwrap_or(0);
 
-    let items: Vec<Value> = rows
-        .into_iter()
-        .map(|r| {
-            let created_at: Option<DateTime<Utc>> = r.try_get("created_at").ok().flatten();
-            let completed_at: Option<DateTime<Utc>> = r.try_get("completed_at").ok().flatten();
-            json!({
-                "id": r.try_get::<i64, _>("id").unwrap_or(0),
-                "order_code": r.try_get::<String, _>("order_code").unwrap_or_default(),
-                "user_id": r.try_get::<i64, _>("user_id").unwrap_or(0),
-                "username": r.try_get::<Option<String>, _>("username").ok().flatten(),
-                "email": r.try_get::<Option<String>, _>("email").ok().flatten(),
-                "subtotal": r.try_get::<f64, _>("subtotal").unwrap_or(0.0),
-                "total": r.try_get::<f64, _>("total").unwrap_or(0.0),
-                "currency": r.try_get::<String, _>("currency").unwrap_or_else(|_| "VND".to_string()),
-                "status": r.try_get::<String, _>("status").unwrap_or_default(),
-                "created_at": created_at,
-                "completed_at": completed_at,
+    let mut items: Vec<Value> = Vec::with_capacity(rows.len());
+    for r in rows {
+        let oid: i64 = r.try_get("id").unwrap_or(0);
+        let created_at: Option<DateTime<Utc>> = r.try_get("created_at").ok().flatten();
+        let completed_at: Option<DateTime<Utc>> = r.try_get("completed_at").ok().flatten();
+
+        let oitems_rows = sqlx::query(
+            r#"
+            SELECT id, product_id, product_code, product_name, quantity,
+                   CAST(unit_price AS DOUBLE) AS unit_price,
+                   CAST(subtotal AS DOUBLE) AS subtotal, delivery_type, customer_data
+            FROM order_items WHERE order_id = ? ORDER BY id ASC
+            "#,
+        )
+        .bind(oid)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+        let delivered_rows = sqlx::query(
+            "SELECT id, product_id, identifier, content FROM product_items WHERE order_id = ?",
+        )
+        .bind(oid)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+        let order_items: Vec<Value> = oitems_rows
+            .into_iter()
+            .map(|oi| {
+                let pid: i64 = oi.try_get("product_id").unwrap_or(0);
+                let raw_cd: Option<String> = oi.try_get("customer_data").ok().flatten();
+                let parsed_cd: Option<Value> = raw_cd.and_then(|s| serde_json::from_str(&s).ok());
+                let delivered: Vec<Value> = delivered_rows
+                    .iter()
+                    .filter(|d| d.try_get::<i64, _>("product_id").unwrap_or(-1) == pid)
+                    .map(|d| {
+                        json!({
+                            "id": d.try_get::<i64, _>("id").unwrap_or(0),
+                            "identifier": d.try_get::<Option<String>, _>("identifier").ok().flatten(),
+                            "content": d.try_get::<Option<String>, _>("content").ok().flatten(),
+                        })
+                    })
+                    .collect();
+                json!({
+                    "id": oi.try_get::<i64, _>("id").unwrap_or(0),
+                    "product_id": pid,
+                    "product_code": oi.try_get::<String, _>("product_code").unwrap_or_default(),
+                    "product_name": oi.try_get::<String, _>("product_name").unwrap_or_default(),
+                    "quantity": oi.try_get::<i64, _>("quantity").unwrap_or(0),
+                    "unit_price": oi.try_get::<f64, _>("unit_price").unwrap_or(0.0),
+                    "subtotal": oi.try_get::<f64, _>("subtotal").unwrap_or(0.0),
+                    "delivery_type": oi.try_get::<Option<String>, _>("delivery_type").ok().flatten(),
+                    "customer_data": parsed_cd,
+                    "delivered_items": delivered,
+                })
             })
-        })
-        .collect();
+            .collect();
+
+        items.push(json!({
+            "id": oid,
+            "order_code": r.try_get::<String, _>("order_code").unwrap_or_default(),
+            "user_id": r.try_get::<i64, _>("user_id").unwrap_or(0),
+            "username": r.try_get::<Option<String>, _>("username").ok().flatten(),
+            "email": r.try_get::<Option<String>, _>("email").ok().flatten(),
+            "subtotal": r.try_get::<f64, _>("subtotal").unwrap_or(0.0),
+            "total": r.try_get::<f64, _>("total").unwrap_or(0.0),
+            "currency": r.try_get::<String, _>("currency").unwrap_or_else(|_| "VND".to_string()),
+            "status": r.try_get::<String, _>("status").unwrap_or_default(),
+            "admin_note": r.try_get::<Option<String>, _>("admin_note").ok().flatten(),
+            "items": order_items,
+            "created_at": created_at,
+            "completed_at": completed_at,
+        }));
+    }
 
     let total_pages = ((total as f64) / (limit as f64)).ceil().max(1.0) as i64;
     Ok(send_success(
         "Lấy danh sách đơn hàng thành công",
         json!({
             "items": items,
+            "processing_count": processing_count,
             "pagination": { "total": total, "page": page, "limit": limit, "total_pages": total_pages }
         }),
     ))
@@ -773,6 +872,8 @@ async fn list_admin_orders_ep(
 #[derive(Deserialize)]
 struct UpdateOrderBody {
     status: String,
+    admin_note: Option<String>,
+    refund: Option<bool>,
 }
 
 async fn update_admin_order_ep(
@@ -781,28 +882,143 @@ async fn update_admin_order_ep(
     Path(order_id): Path<i64>,
     Json(body): Json<UpdateOrderBody>,
 ) -> AppResult<Json<Value>> {
+    let target_status = body.status.trim().to_lowercase();
     if !matches!(
-        body.status.as_str(),
+        target_status.as_str(),
         "pending" | "processing" | "completed" | "cancelled" | "failed" | "refunded"
     ) {
         return Err(AppError::bad_request("Trạng thái đơn hàng không hợp lệ"));
     }
 
     let pool = state.db()?;
-    let res = sqlx::query(
-        "UPDATE orders SET status = ?, completed_at = IF(? = 'completed', COALESCE(completed_at, NOW()), completed_at) WHERE id = ?",
+    let mut tx = pool.begin().await?;
+
+    let order = sqlx::query(
+        r#"
+        SELECT id, order_code, user_id, wallet_id, CAST(total AS DOUBLE) AS total, status
+        FROM orders WHERE id = ? FOR UPDATE
+        "#,
     )
-    .bind(&body.status)
-    .bind(&body.status)
     .bind(order_id)
-    .execute(pool)
+    .fetch_optional(&mut *tx)
     .await?;
 
-    if res.rows_affected() == 0 {
+    let Some(order) = order else {
         return Err(AppError::not_found("Đơn hàng không tồn tại"));
+    };
+
+    let prev_status: String = order.try_get("status").unwrap_or_default();
+    let order_code: String = order.try_get("order_code").unwrap_or_default();
+    let user_id: i64 = order.try_get("user_id").unwrap_or(0);
+    let wallet_id: i64 = order.try_get("wallet_id").unwrap_or(0);
+    let total: f64 = order.try_get("total").unwrap_or(0.0);
+
+    let should_refund = (target_status == "cancelled" || target_status == "refunded")
+        && body.refund.unwrap_or(true)
+        && prev_status != "cancelled"
+        && prev_status != "refunded";
+
+    let mut refunded_amount = 0.0_f64;
+    if should_refund && total > 0.0 {
+        let w = sqlx::query(
+            "SELECT CAST(balance AS DOUBLE) AS balance FROM wallets WHERE id = ? FOR UPDATE",
+        )
+        .bind(wallet_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if let Some(wallet_row) = w {
+            let bal_before: f64 = wallet_row.try_get("balance").unwrap_or(0.0);
+            let bal_after = bal_before + total;
+            sqlx::query(
+                "UPDATE wallets SET balance = balance + ?, total_spent = GREATEST(0, total_spent - ?) WHERE id = ?",
+            )
+            .bind(total)
+            .bind(total)
+            .bind(wallet_id)
+            .execute(&mut *tx)
+            .await?;
+
+            let tx_code = generate_transaction_code();
+            sqlx::query(
+                r#"
+                INSERT INTO transactions
+                (transaction_code, user_id, wallet_id, type, amount, balance_before, balance_after, status, payment_method, reference_id, description, completed_at)
+                VALUES (?, ?, ?, 'refund', ?, ?, ?, 'completed', 'wallet', ?, ?, CURRENT_TIMESTAMP)
+                "#,
+            )
+            .bind(&tx_code)
+            .bind(user_id)
+            .bind(wallet_id)
+            .bind(total)
+            .bind(bal_before)
+            .bind(bal_after)
+            .bind(format!("REFUND-{}", order_code))
+            .bind(format!("Hoàn tiền đơn hàng {} (Admin)", order_code))
+            .execute(&mut *tx)
+            .await?;
+
+            refunded_amount = total;
+        }
+
+        let oitems = sqlx::query(
+            "SELECT product_id, quantity, delivery_type FROM order_items WHERE order_id = ?",
+        )
+        .bind(order_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        for oi in oitems {
+            let dt: String = oi
+                .try_get::<Option<String>, _>("delivery_type")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            if dt.eq_ignore_ascii_case("manual") {
+                let pid: i64 = oi.try_get("product_id").unwrap_or(0);
+                let qty: i64 = oi.try_get("quantity").unwrap_or(0);
+                sqlx::query("UPDATE products SET stock = stock + ? WHERE id = ?")
+                    .bind(qty)
+                    .bind(pid)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
     }
 
-    Ok(send_success_empty("Cập nhật trạng thái đơn hàng thành công"))
+    let note_clean = body
+        .admin_note
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    sqlx::query(
+        r#"
+        UPDATE orders
+        SET status = ?,
+            admin_note = COALESCE(?, admin_note),
+            completed_at = IF(? = 'completed', COALESCE(completed_at, NOW()), completed_at)
+        WHERE id = ?
+        "#,
+    )
+    .bind(&target_status)
+    .bind(&note_clean)
+    .bind(&target_status)
+    .bind(order_id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    Ok(send_success(
+        "Cập nhật trạng thái đơn hàng thành công",
+        json!({
+            "id": order_id,
+            "status": target_status,
+            "admin_note": note_clean,
+            "refunded": refunded_amount,
+        }),
+    ))
 }
 
 /* ========================= PROVIDERS ========================= */
